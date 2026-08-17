@@ -192,19 +192,27 @@ function save(key, value) {
 }
 
 async function analyzeMeal({ description, imageBase64, imageMediaType, apiKey }) {
-  if (!apiKey) throw new Error("Ajoute d'abord ta clé Gemini dans les réglages (icône ⚙).");
+  const key = (apiKey || "").trim();
+  if (!key) throw new Error("Ajoute d'abord ta clé Gemini dans les réglages (icône ⚙).");
   const parts = [];
   const prompt = 'Tu es un nutritionniste expert. Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact : {"label": "nom court du repas", "calories": nombre, "protein": nombre_grammes, "carbs": nombre_grammes, "fat": nombre_grammes}. Donne ta meilleure estimation réaliste même si l\'information est incomplète.';
   parts.push({ text: prompt });
   if (description) parts.push({ text: `Description du repas : ${description}` });
   if (imageBase64) parts.push({ inline_data: { mime_type: imageMediaType || "image/jpeg", data: imageBase64 } });
 
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0.2 } }),
   });
-  if (!res.ok) throw new Error("L'analyse a échoué (vérifie ta clé Gemini dans les réglages).");
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const errJson = await res.json();
+      detail = errJson?.error?.message || "";
+    } catch {}
+    throw new Error(`Erreur Gemini (${res.status})${detail ? " : " + detail : ""}`);
+  }
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
   const cleaned = rawText.replace(/```json|```/g, "").trim();
@@ -300,7 +308,7 @@ function SettingsModal({ apiKey, onSave, onClose }) {
         />
         <div className="flex gap-2">
           <button onClick={onClose} className="px-4 py-3 rounded-xl border border-stone-300">Fermer</button>
-          <button onClick={() => { onSave(value); onClose(); }} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">
+          <button onClick={() => { onSave(value.trim()); onClose(); }} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">
             Enregistrer
           </button>
         </div>
@@ -407,7 +415,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
     : null;
 
   function finish() {
-    onSaveApiKey(apiKeyInput);
+    onSaveApiKey(apiKeyInput.trim());
     const targets = computeTargets({ sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, goal });
     onDone({ goal, sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, targets, weighDay, targetWeightKg: targetWeightKg ? Number(targetWeightKg) : null });
   }
