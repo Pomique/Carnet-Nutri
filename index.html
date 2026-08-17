@@ -181,6 +181,25 @@ function computeProjection(weights, targetWeightKg) {
   return { status: "on_track", weeksRemaining: Math.max(1, Math.round(Math.abs(remaining / weeklyRate))) };
 }
 
+/** Nombre de jours consécutifs (jusqu'à hier, ou aujourd'hui si déjà renseigné) où les calories sont restées dans la cible */
+function computeStreak(meals, targetCalories) {
+  if (!targetCalories) return 0;
+  let streak = 0;
+  let cursor = new Date();
+  const todayTotal = (meals[todayKey()] || []).reduce((s, m) => s + (m.calories || 0), 0);
+  if (todayTotal === 0) cursor = addDays(cursor, -1);
+  while (true) {
+    const key = toKey(cursor);
+    const dm = meals[key] || [];
+    const total = dm.reduce((s, m) => s + (m.calories || 0), 0);
+    if (total > 0 && total <= targetCalories * 1.05) {
+      streak++;
+      cursor = addDays(cursor, -1);
+    } else break;
+  }
+  return streak;
+}
+
 function load(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -538,84 +557,6 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
   );
 }
 
-function WeekView({ profile, meals, weights, weekStart, setWeekStart, onOpenDay, onEditProfile, onOpenSettings, onOpenWeight }) {
-  const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
-  const target = profile.targets.calories;
-
-  const weekTotal = days.reduce((sum, d) => {
-    const dm = meals[toKey(d)] || [];
-    return sum + dm.reduce((s, m) => s + (m.calories || 0), 0);
-  }, 0);
-  const weekAvg = Math.round(weekTotal / 7);
-
-  const weekLabel = `${days[0].toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} – ${days[6].toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}`;
-
-  const latestWeight = Object.entries(weights).sort(([a], [b]) => b.localeCompare(a))[0];
-
-  return (
-    <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
-      <div className="max-w-lg mx-auto">
-        <header className="flex items-center justify-between mb-1">
-          <p className="font-mono text-xs tracking-widest text-amber-500 uppercase">{profile.goal.replace(/_/g, " ")}</p>
-          <div className="flex items-center gap-3">
-            <button onClick={() => { if (window.confirm("Modifier ton profil ? Il faudra tout resaisir (objectif, âge, poids, activité...).")) onEditProfile(); }} className="font-mono text-xs text-stone-500 underline">modifier</button>
-            <button onClick={onOpenSettings} className="text-stone-500 text-lg">⚙</button>
-          </div>
-        </header>
-        <h1 className="text-3xl font-black mb-1">{weekLabel}</h1>
-        <p className="font-mono text-xs text-stone-500 mb-6">
-          Moyenne : {weekAvg} / {target} kcal · jour
-        </p>
-
-        <div className="flex items-center justify-between mb-4">
-          <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="text-stone-500 hover:text-stone-100 px-2">← Semaine préc.</button>
-          <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="text-stone-500 hover:text-stone-100 px-2">Semaine suiv. →</button>
-        </div>
-
-        <div className="grid grid-cols-7 gap-1.5 mb-6">
-          {days.map((d, i) => {
-            const key = toKey(d);
-            const dm = meals[key] || [];
-            const total = dm.reduce((s, m) => s + (m.calories || 0), 0);
-            const ratio = total ? total / target : 0;
-            const fillClass = ratio === 0 ? "" : ratio < 0.85 ? "bg-emerald-500" : ratio <= 1.05 ? "bg-amber-500" : "bg-rose-500";
-            const isToday = key === todayKey();
-            return (
-              <button key={i} onClick={() => onOpenDay(key)}
-                className={`aspect-square rounded-lg bg-stone-100 text-stone-900 flex flex-col items-center justify-center relative overflow-hidden ${isToday ? "ring-2 ring-amber-500" : ""}`}>
-                <span className="font-mono text-[10px] text-stone-500 z-10">{WEEKDAYS[i].slice(0, 2)}</span>
-                <span className="font-mono text-sm z-10">{d.getDate()}</span>
-                {total > 0 && <div className={`absolute bottom-0 left-0 right-0 opacity-40 ${fillClass}`} style={{ height: `${Math.min(ratio, 1) * 100}%` }} />}
-              </button>
-            );
-          })}
-        </div>
-
-        <button onClick={onOpenWeight} className="w-full bg-stone-100 text-stone-900 rounded-2xl p-5 text-left mb-4">
-          <div className="flex justify-between items-center mb-2">
-            <h2 className="font-semibold">Suivi du poids</h2>
-            <span className="font-mono text-xs text-amber-600">voir tout →</span>
-          </div>
-          {latestWeight ? (
-            <p className="font-mono text-sm text-stone-600">Dernière pesée : {latestWeight[1]} kg</p>
-          ) : (
-            <p className="text-stone-500 text-sm">Pas encore de pesée enregistrée</p>
-          )}
-          {profile.targetWeightKg && (() => {
-            const projection = computeProjection(weights, profile.targetWeightKg);
-            if (projection?.status === "on_track") {
-              return <p className="font-mono text-xs text-amber-600 mt-1">→ objectif dans ~{projection.weeksRemaining} sem.</p>;
-            }
-            return null;
-          })()}
-        </button>
-
-        <p className="text-stone-600 text-xs text-center">Vert = sous l'objectif · Or = dans la cible · Corail = dépassé</p>
-      </div>
-    </div>
-  );
-}
-
 function WeightPage({ weights, targetWeightKg, onBack, onAdd, onUpdateTarget }) {
   const [value, setValue] = useState("");
   const [date, setDate] = useState(todayKey());
@@ -632,7 +573,7 @@ function WeightPage({ weights, targetWeightKg, onBack, onAdd, onUpdateTarget }) 
   return (
     <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
       <div className="max-w-lg mx-auto">
-        <button onClick={onBack} className="text-stone-500 text-sm mb-2">← Semaine</button>
+        <button onClick={onBack} className="text-stone-500 text-sm mb-2">← Retour</button>
         <h1 className="text-3xl font-black mb-6">Suivi du poids</h1>
 
         <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
@@ -726,7 +667,7 @@ function computeRecent(meals, type, favorites) {
   return recent;
 }
 
-function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite }) {
+function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey, onNavigateDay, onEditProfile, onOpenSettings, onOpenWeight, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite }) {
   const [openSlot, setOpenSlot] = useState(null);
   const [mode, setMode] = useState("describe");
   const [text, setText] = useState("");
@@ -740,6 +681,7 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
   const [undoMeal, setUndoMeal] = useState(null);
   const undoTimerRef = useRef(null);
 
+  const targets = profile.targets;
   const totals = useMemo(() => dayMeals.reduce((acc, m) => ({
     calories: acc.calories + (m.calories || 0),
     protein: acc.protein + (m.protein || 0),
@@ -748,6 +690,8 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
   }), { calories: 0, protein: 0, carbs: 0, fat: 0 }), [dayMeals]);
 
   const niceDate = new Date(date + "T00:00:00").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+  const streak = useMemo(() => computeStreak(allMeals, targets.calories), [allMeals, targets.calories]);
+  const latestWeight = useMemo(() => Object.entries(weights).sort(([a], [b]) => b.localeCompare(a))[0], [weights]);
 
   async function submit() {
     if (!openSlot || (!text.trim() && !photo)) return;
@@ -799,8 +743,43 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
   return (
     <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
       <div className="max-w-lg mx-auto">
-        <button onClick={onBack} className="text-stone-500 text-sm mb-2">← Semaine</button>
-        <h1 className="text-3xl font-black capitalize mb-6">{niceDate}</h1>
+        <header className="flex items-center justify-between mb-1">
+          <p className="font-mono text-xs tracking-widest text-amber-500 uppercase">{profile.goal.replace(/_/g, " ")}</p>
+          <div className="flex items-center gap-3">
+            <button onClick={() => { if (window.confirm("Modifier ton profil ? Il faudra tout resaisir (objectif, âge, poids, activité...).")) onEditProfile(); }} className="font-mono text-xs text-stone-500 underline">modifier</button>
+            <button onClick={onOpenSettings} className="text-stone-500 text-lg">⚙</button>
+          </div>
+        </header>
+
+        <div className="flex items-center justify-between mb-1">
+          <button onClick={() => onNavigateDay(-1)} className="text-stone-500 hover:text-stone-100 text-xl px-2">←</button>
+          <h1 className="text-2xl font-black capitalize text-center">{niceDate}</h1>
+          <button onClick={() => onNavigateDay(1)} className="text-stone-500 hover:text-stone-100 text-xl px-2">→</button>
+        </div>
+
+        {streak > 0 && (
+          <p className="text-center font-mono text-xs text-amber-500 mb-6">🔥 {streak} jour{streak > 1 ? "s" : ""} d'affilée dans l'objectif</p>
+        )}
+        {streak === 0 && <div className="mb-6" />}
+
+        <button onClick={onOpenWeight} className="w-full bg-stone-100 text-stone-900 rounded-2xl p-5 text-left mb-6">
+          <div className="flex justify-between items-center mb-2">
+            <h2 className="font-semibold">Suivi du poids</h2>
+            <span className="font-mono text-xs text-amber-600">voir tout →</span>
+          </div>
+          {latestWeight ? (
+            <p className="font-mono text-sm text-stone-600">Dernière pesée : {latestWeight[1]} kg</p>
+          ) : (
+            <p className="text-stone-500 text-sm">Pas encore de pesée enregistrée</p>
+          )}
+          {profile.targetWeightKg && (() => {
+            const projection = computeProjection(weights, profile.targetWeightKg);
+            if (projection?.status === "on_track") {
+              return <p className="font-mono text-xs text-amber-600 mt-1">→ objectif dans ~{projection.weeksRemaining} sem.</p>;
+            }
+            return null;
+          })()}
+        </button>
 
         <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
@@ -975,9 +954,8 @@ function App() {
   const [weights, setWeights] = useState(() => load("nutri_weights", {}));
   const [favorites, setFavorites] = useState(() => load("nutri_favorites", []));
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("nutri_gemini_key") || "");
-  const [view, setView] = useState("week");
-  const [selectedDate, setSelectedDate] = useState(null);
-  const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
+  const [view, setView] = useState("day");
+  const [selectedDate, setSelectedDate] = useState(() => todayKey());
   const [showSettings, setShowSettings] = useState(false);
   const [showWeigh, setShowWeigh] = useState(false);
   const [adjustment, setAdjustment] = useState(null);
@@ -1026,29 +1004,19 @@ function App() {
         />
       )}
 
-      {view === "week" && (
-        <WeekView
-          profile={profile}
-          meals={meals}
-          weights={weights}
-          weekStart={weekStart}
-          setWeekStart={setWeekStart}
-          onOpenDay={(d) => { setSelectedDate(d); setView("day"); }}
-          onEditProfile={() => updateProfile(null)}
-          onOpenSettings={() => setShowSettings(true)}
-          onOpenWeight={() => setView("weight")}
-        />
-      )}
-
-      {view === "day" && selectedDate && (
+      {view === "day" && (
         <DayView
           date={selectedDate}
-          targets={profile.targets}
+          profile={profile}
+          weights={weights}
           dayMeals={meals[selectedDate] || []}
           allMeals={meals}
           favorites={favorites}
           apiKey={apiKey}
-          onBack={() => setView("week")}
+          onNavigateDay={(delta) => setSelectedDate(toKey(addDays(new Date(selectedDate + "T00:00:00"), delta)))}
+          onEditProfile={() => updateProfile(null)}
+          onOpenSettings={() => setShowSettings(true)}
+          onOpenWeight={() => setView("weight")}
           onAddMeal={(meal) => updateMeals({ ...meals, [selectedDate]: [...(meals[selectedDate] || []), meal] })}
           onRemoveMeal={(id) => updateMeals({ ...meals, [selectedDate]: (meals[selectedDate] || []).filter(m => m.id !== id) })}
           onEditMeal={(updated) => updateMeals({ ...meals, [selectedDate]: (meals[selectedDate] || []).map(m => m.id === updated.id ? updated : m) })}
@@ -1061,7 +1029,7 @@ function App() {
         <WeightPage
           weights={weights}
           targetWeightKg={profile.targetWeightKg}
-          onBack={() => setView("week")}
+          onBack={() => setView("day")}
           onAdd={(date, kg) => updateWeights({ ...weights, [date]: kg })}
           onUpdateTarget={(kg) => updateProfile({ ...profile, targetWeightKg: kg })}
         />
