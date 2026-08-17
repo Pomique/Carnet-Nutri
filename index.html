@@ -38,7 +38,7 @@
 </script>
 <script type="text/babel" data-presets="react">
 
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 const GOALS = [
   { value: "prise_de_muscle", label: "Prise de muscle", hint: "Léger surplus, riche en protéines" },
@@ -58,19 +58,25 @@ const SLOTS = [
   { type: "grignotage", label: "Grignotage" },
 ];
 const WEEKDAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
-const GOAL_ADJ = { prise_de_muscle: 1.12, perte_de_poids: 0.82, maintien: 1 };
+const GOAL_WEEKLY_RATE = { prise_de_muscle: 0.0035, perte_de_poids: -0.007, maintien: 0 }; // % du poids de corps / semaine
 
 function computeTargets({ sex, age, heightCm, weightKg, activity, goal }) {
   const bmr = sex === "homme"
     ? 10 * weightKg + 6.25 * heightCm - 5 * age + 5
     : 10 * weightKg + 6.25 * heightCm - 5 * age - 161;
   const factor = ACTIVITY.find(a => a[0] === activity)?.[2] || 1.375;
-  const calories = Math.round(bmr * factor * GOAL_ADJ[goal]);
+  const tdee = bmr * factor;
+
+  // Rythme hebdomadaire sûr, proportionnel au poids (plutôt qu'un % arbitraire du TDEE)
+  const weeklyRateKg = weightKg * GOAL_WEEKLY_RATE[goal];
+  const dailyCalorieDelta = (weeklyRateKg * 7700) / 7; // ~7700 kcal par kg de masse corporelle
+  const calories = Math.round(tdee + dailyCalorieDelta);
+
   const proteinPerKg = goal === "prise_de_muscle" ? 2.0 : goal === "perte_de_poids" ? 1.8 : 1.6;
   const protein = Math.round(weightKg * proteinPerKg);
   const fat = Math.round((calories * 0.28) / 9);
   const carbs = Math.max(0, Math.round((calories - protein * 4 - fat * 9) / 4));
-  return { calories, protein, carbs, fat };
+  return { calories, protein, carbs, fat, weeklyRateKg };
 }
 
 function pad(n) { return String(n).padStart(2, "0"); }
@@ -134,6 +140,47 @@ function fileToBase64(file) {
   });
 }
 
+/** Redimensionne/compresse une photo avant analyse et stockage (limite la taille en localStorage) */
+function compressImage(file, maxDim = 700, quality = 0.6) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round((height * maxDim) / width); width = maxDim; }
+        else if (height > maxDim) { width = Math.round((width * maxDim) / height); height = maxDim; }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        resolve({ dataUrl, base64: dataUrl.split(",")[1] });
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Estime dans combien de semaines l'objectif de poids sera atteint, à partir de la tendance observée */
+function computeProjection(weights, targetWeightKg) {
+  if (!targetWeightKg) return null;
+  const entries = Object.entries(weights).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length < 2) return null;
+  const [firstKey, firstKg] = entries[0];
+  const [lastKey, lastKg] = entries[entries.length - 1];
+  const weeks = daysBetween(lastKey, firstKey) / 7;
+  if (weeks <= 0) return null;
+  const weeklyRate = (lastKg - firstKg) / weeks;
+  const remaining = targetWeightKg - lastKg;
+  if (Math.abs(remaining) < 0.2) return { status: "reached" };
+  if (Math.abs(weeklyRate) < 0.02) return { status: "stalled" };
+  if (Math.sign(remaining) !== Math.sign(weeklyRate)) return { status: "wrong_direction" };
+  return { status: "on_track", weeksRemaining: Math.max(1, Math.round(Math.abs(remaining / weeklyRate))) };
+}
+
 function load(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -181,6 +228,55 @@ function Gauge({ label, value, target, unit, colorClass }) {
       </div>
       <div className="h-2 rounded-full bg-stone-200 overflow-hidden">
         <div className={`h-full rounded-full ${colorClass}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function MacroDonut({ protein, carbs, fat }) {
+  const pCal = protein * 4, cCal = carbs * 4, fCal = fat * 9;
+  const total = pCal + cCal + fCal;
+  const r = 45, cx = 60, cy = 60, circumference = 2 * Math.PI * r;
+  if (total === 0) {
+    return <p className="text-stone-500 text-sm text-center py-8">Rien noté aujourd'hui pour l'instant.</p>;
+  }
+  const segments = [
+    { label: "Protéines", value: pCal, color: "#10b981" },
+    { label: "Glucides", value: cCal, color: "#f43f5e" },
+    { label: "Lipides", value: fCal, color: "#0ea5e9" },
+  ];
+  let offset = 0;
+  return (
+    <div className="flex items-center gap-6">
+      <svg width="120" height="120" viewBox="0 0 120 120">
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#e7e5e4" strokeWidth="14" />
+        {segments.map((s, i) => {
+          const frac = s.value / total;
+          const dash = frac * circumference;
+          const circle = (
+            <circle
+              key={i}
+              cx={cx} cy={cy} r={r}
+              fill="none"
+              stroke={s.color}
+              strokeWidth="14"
+              strokeDasharray={`${dash} ${circumference - dash}`}
+              strokeDashoffset={-offset}
+              transform={`rotate(-90 ${cx} ${cy})`}
+            />
+          );
+          offset += dash;
+          return circle;
+        })}
+      </svg>
+      <div className="flex flex-col gap-2">
+        {segments.map((s, i) => (
+          <div key={i} className="flex items-center gap-2 text-sm">
+            <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />
+            <span>{s.label}</span>
+            <span className="font-mono text-xs text-stone-500">{Math.round((s.value / total) * 100)}%</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -290,8 +386,9 @@ function WeightChart({ weights }) {
   );
 }
 
-function Onboarding({ onDone }) {
+function Onboarding({ onDone, apiKey, onSaveApiKey }) {
   const [step, setStep] = useState(0);
+  const [apiKeyInput, setApiKeyInput] = useState(apiKey || "");
   const [goal, setGoal] = useState(null);
   const [sex, setSex] = useState("homme");
   const [age, setAge] = useState("");
@@ -299,18 +396,50 @@ function Onboarding({ onDone }) {
   const [weightKg, setWeightKg] = useState("");
   const [activity, setActivity] = useState("modere");
   const [weighDay, setWeighDay] = useState(0);
+  const [targetWeightKg, setTargetWeightKg] = useState("");
+
+  const canEstimate = goal && age && heightCm && weightKg;
+  const provisionalTargets = canEstimate
+    ? computeTargets({ sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, goal })
+    : null;
+  const weeksEstimate = provisionalTargets && targetWeightKg && provisionalTargets.weeklyRateKg !== 0
+    ? Math.round(Math.abs((Number(targetWeightKg) - Number(weightKg)) / provisionalTargets.weeklyRateKg))
+    : null;
 
   function finish() {
+    onSaveApiKey(apiKeyInput);
     const targets = computeTargets({ sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, goal });
-    onDone({ goal, sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, targets, weighDay });
+    onDone({ goal, sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, targets, weighDay, targetWeightKg: targetWeightKg ? Number(targetWeightKg) : null });
   }
 
   return (
     <div className="min-h-screen bg-stone-950 flex items-center justify-center px-6">
       <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-8">
-        <p className="font-mono text-xs tracking-widest text-amber-600 uppercase mb-1">Étape {step + 1} / 4</p>
+        <p className="font-mono text-xs tracking-widest text-amber-600 uppercase mb-1">Étape {step + 1} / 6</p>
 
         {step === 0 && (
+          <>
+            <h2 className="text-2xl font-bold mb-2">Ta clé API Gemini</h2>
+            <p className="text-sm text-stone-500 mb-6">
+              Nécessaire pour analyser tes repas (texte ou photo). Gratuite sur{" "}
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" className="text-amber-600 underline">aistudio.google.com/apikey</a>.
+              Elle reste stockée uniquement sur cet appareil.
+            </p>
+            <input
+              type="password"
+              value={apiKeyInput}
+              onChange={e => setApiKeyInput(e.target.value)}
+              placeholder="Clé API Gemini"
+              className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-8 font-mono text-sm"
+            />
+            <div className="flex gap-2">
+              <button onClick={() => setStep(1)} className="px-4 py-3 rounded-xl border border-stone-300 text-sm text-stone-500">Passer pour l'instant</button>
+              <button onClick={() => setStep(1)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
+            </div>
+          </>
+        )}
+
+        {step === 1 && (
           <>
             <h2 className="text-2xl font-bold mb-6">Quel est ton objectif ?</h2>
             <div className="flex flex-col gap-3">
@@ -322,11 +451,14 @@ function Onboarding({ onDone }) {
                 </button>
               ))}
             </div>
-            <button disabled={!goal} onClick={() => setStep(1)} className="mt-8 w-full bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
+            <div className="flex gap-2 mt-8">
+              <button onClick={() => setStep(0)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button disabled={!goal} onClick={() => setStep(2)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
+            </div>
           </>
         )}
 
-        {step === 1 && (
+        {step === 2 && (
           <>
             <h2 className="text-2xl font-bold mb-6">Un peu plus sur toi</h2>
             <div className="flex gap-2 mb-4">
@@ -340,13 +472,13 @@ function Onboarding({ onDone }) {
               <input type="number" placeholder="Poids kg" value={weightKg} onChange={e => setWeightKg(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2" />
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(0)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
-              <button disabled={!age || !heightCm || !weightKg} onClick={() => setStep(2)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
+              <button onClick={() => setStep(1)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button disabled={!age || !heightCm || !weightKg} onClick={() => setStep(3)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
             </div>
           </>
         )}
 
-        {step === 2 && (
+        {step === 3 && (
           <>
             <h2 className="text-2xl font-bold mb-6">Ton niveau d'activité</h2>
             <div className="flex flex-col gap-3 mb-8">
@@ -355,13 +487,13 @@ function Onboarding({ onDone }) {
               ))}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(1)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
-              <button onClick={() => setStep(3)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
+              <button onClick={() => setStep(2)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={() => setStep(4)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
             </div>
           </>
         )}
 
-        {step === 3 && (
+        {step === 4 && (
           <>
             <h2 className="text-2xl font-bold mb-2">Ton jour de pesée</h2>
             <p className="text-sm text-stone-500 mb-6">Chaque semaine, ce jour-là, l'app te demandera ton poids.</p>
@@ -371,7 +503,24 @@ function Onboarding({ onDone }) {
               ))}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(2)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={() => setStep(3)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={() => setStep(5)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
+            </div>
+          </>
+        )}
+
+        {step === 5 && (
+          <>
+            <h2 className="text-2xl font-bold mb-2">Poids cible (optionnel)</h2>
+            <p className="text-sm text-stone-500 mb-4">Ça permet d'estimer combien de temps ça prendra, selon un rythme sûr par rapport à ton poids actuel.</p>
+            <input type="number" step="0.1" placeholder="Poids cible en kg" value={targetWeightKg} onChange={e => setTargetWeightKg(e.target.value)} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-3" />
+            {weeksEstimate !== null && (
+              <p className="text-sm text-amber-600 mb-4">
+                À {provisionalTargets.calories} kcal/j, ça devrait prendre environ <span className="font-semibold">{weeksEstimate} semaine{weeksEstimate > 1 ? "s" : ""}</span>.
+              </p>
+            )}
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setStep(4)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
               <button onClick={finish} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Créer mon carnet</button>
             </div>
           </>
@@ -401,7 +550,7 @@ function WeekView({ profile, meals, weights, weekStart, setWeekStart, onOpenDay,
         <header className="flex items-center justify-between mb-1">
           <p className="font-mono text-xs tracking-widest text-amber-500 uppercase">{profile.goal.replace(/_/g, " ")}</p>
           <div className="flex items-center gap-3">
-            <button onClick={onEditProfile} className="font-mono text-xs text-stone-500 underline">modifier</button>
+            <button onClick={() => { if (window.confirm("Modifier ton profil ? Il faudra tout resaisir (objectif, âge, poids, activité...).")) onEditProfile(); }} className="font-mono text-xs text-stone-500 underline">modifier</button>
             <button onClick={onOpenSettings} className="text-stone-500 text-lg">⚙</button>
           </div>
         </header>
@@ -444,6 +593,13 @@ function WeekView({ profile, meals, weights, weekStart, setWeekStart, onOpenDay,
           ) : (
             <p className="text-stone-500 text-sm">Pas encore de pesée enregistrée</p>
           )}
+          {profile.targetWeightKg && (() => {
+            const projection = computeProjection(weights, profile.targetWeightKg);
+            if (projection?.status === "on_track") {
+              return <p className="font-mono text-xs text-amber-600 mt-1">→ objectif dans ~{projection.weeksRemaining} sem.</p>;
+            }
+            return null;
+          })()}
         </button>
 
         <p className="text-stone-600 text-xs text-center">Vert = sous l'objectif · Or = dans la cible · Corail = dépassé</p>
@@ -452,10 +608,18 @@ function WeekView({ profile, meals, weights, weekStart, setWeekStart, onOpenDay,
   );
 }
 
-function WeightPage({ weights, onBack, onAdd }) {
+function WeightPage({ weights, targetWeightKg, onBack, onAdd, onUpdateTarget }) {
   const [value, setValue] = useState("");
   const [date, setDate] = useState(todayKey());
+  const [editingTarget, setEditingTarget] = useState(false);
+  const [targetInput, setTargetInput] = useState(targetWeightKg || "");
   const entries = Object.entries(weights).sort(([a], [b]) => b.localeCompare(a));
+  const projection = computeProjection(weights, targetWeightKg);
+
+  function saveTarget() {
+    onUpdateTarget(targetInput ? Number(targetInput) : null);
+    setEditingTarget(false);
+  }
 
   return (
     <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
@@ -465,6 +629,34 @@ function WeightPage({ weights, onBack, onAdd }) {
 
         <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
           <WeightChart weights={weights} />
+        </div>
+
+        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="font-semibold">{targetWeightKg ? `Objectif : ${targetWeightKg} kg` : "Pas encore de poids cible"}</h2>
+            <button onClick={() => { setTargetInput(targetWeightKg || ""); setEditingTarget(v => !v); }} className="text-amber-600 font-mono text-xs">
+              {targetWeightKg ? "modifier" : "définir"}
+            </button>
+          </div>
+
+          {editingTarget && (
+            <div className="flex gap-2 mb-3">
+              <input type="number" step="0.1" placeholder="Poids cible en kg" value={targetInput} onChange={e => setTargetInput(e.target.value)} className="flex-1 border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+              <button onClick={saveTarget} className="bg-amber-500 text-stone-900 font-medium px-4 rounded-xl text-sm">Enregistrer</button>
+            </div>
+          )}
+
+          {targetWeightKg && !editingTarget && (
+            <>
+              {!projection && <p className="text-stone-500 text-sm">Note au moins 2 pesées pour estimer ta progression.</p>}
+              {projection?.status === "reached" && <p className="text-emerald-600 text-sm font-medium">Objectif atteint 🎉</p>}
+              {projection?.status === "stalled" && <p className="text-stone-500 text-sm">Ton poids est stable pour l'instant, pas encore de tendance claire.</p>}
+              {projection?.status === "wrong_direction" && <p className="text-rose-500 text-sm">Ton poids évolue dans le sens inverse de ton objectif en ce moment.</p>}
+              {projection?.status === "on_track" && (
+                <p className="text-sm">À ce rythme, tu devrais atteindre ton objectif dans environ <span className="font-semibold text-amber-600">{projection.weeksRemaining} semaine{projection.weeksRemaining > 1 ? "s" : ""}</span>.</p>
+              )}
+            </>
+          )}
         </div>
 
         <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
@@ -526,7 +718,7 @@ function computeRecent(meals, type, favorites) {
   return recent;
 }
 
-function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite }) {
+function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite }) {
   const [openSlot, setOpenSlot] = useState(null);
   const [mode, setMode] = useState("describe");
   const [text, setText] = useState("");
@@ -535,6 +727,10 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState(null);
+  const [macroView, setMacroView] = useState("gauges");
+  const [search, setSearch] = useState("");
+  const [undoMeal, setUndoMeal] = useState(null);
+  const undoTimerRef = useRef(null);
 
   const totals = useMemo(() => dayMeals.reduce((acc, m) => ({
     calories: acc.calories + (m.calories || 0),
@@ -550,13 +746,17 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
     setLoading(true);
     setError("");
     try {
-      let imageBase64 = null, imageMediaType = null;
-      if (photo) { imageBase64 = await fileToBase64(photo); imageMediaType = photo.type; }
+      let imageBase64 = null, imageMediaType = null, photoDataUrl = null;
+      if (photo) {
+        const compressed = await compressImage(photo);
+        imageBase64 = compressed.base64;
+        imageMediaType = "image/jpeg";
+        photoDataUrl = compressed.dataUrl;
+      }
       const result = await analyzeMeal({ description: text, imageBase64, imageMediaType, apiKey });
-      const meal = { id: `${Date.now()}`, type: openSlot, description: text || result.label, calories: result.calories, protein: result.protein, carbs: result.carbs, fat: result.fat };
+      const meal = { id: `${Date.now()}`, type: openSlot, description: text || result.label, calories: result.calories, protein: result.protein, carbs: result.carbs, fat: result.fat, photo: photoDataUrl };
       onAddMeal(meal);
-      if (asFavorite) onSaveFavorite(meal);
-      setOpenSlot(null); setText(""); setPhoto(null); setAsFavorite(false);
+      setOpenSlot(null); setText(""); setPhoto(null);
     } catch (e) {
       setError(e.message || "Erreur inconnue");
     } finally {
@@ -571,7 +771,21 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
   }
 
   function closeModal() {
-    setOpenSlot(null); setText(""); setPhoto(null); setError(""); setAsFavorite(false); setMode("describe");
+    setOpenSlot(null); setText(""); setPhoto(null); setError(""); setAsFavorite(false); setMode("describe"); setSearch("");
+  }
+
+  function removeMealWithUndo(meal) {
+    onRemoveMeal(meal.id);
+    setUndoMeal(meal);
+    clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => setUndoMeal(null), 5000);
+  }
+
+  function undoDelete() {
+    if (!undoMeal) return;
+    onAddMeal(undoMeal);
+    setUndoMeal(null);
+    clearTimeout(undoTimerRef.current);
   }
 
   return (
@@ -580,11 +794,22 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
         <button onClick={onBack} className="text-stone-500 text-sm mb-2">← Semaine</button>
         <h1 className="text-3xl font-black capitalize mb-6">{niceDate}</h1>
 
-        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6 flex flex-col gap-3">
-          <Gauge label="Calories" value={totals.calories} target={targets.calories} unit="kcal" colorClass="bg-amber-500" />
-          <Gauge label="Protéines" value={totals.protein} target={targets.protein} unit="g" colorClass="bg-emerald-500" />
-          <Gauge label="Glucides" value={totals.carbs} target={targets.carbs} unit="g" colorClass="bg-rose-500" />
-          <Gauge label="Lipides" value={totals.fat} target={targets.fat} unit="g" colorClass="bg-sky-500" />
+        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">←</button>
+            <span className="font-mono text-xs text-stone-400 uppercase tracking-wide">{macroView === "gauges" ? "Jauges" : "Répartition"}</span>
+            <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">→</button>
+          </div>
+          {macroView === "gauges" ? (
+            <div className="flex flex-col gap-3">
+              <Gauge label="Calories" value={totals.calories} target={targets.calories} unit="kcal" colorClass="bg-amber-500" />
+              <Gauge label="Protéines" value={totals.protein} target={targets.protein} unit="g" colorClass="bg-emerald-500" />
+              <Gauge label="Glucides" value={totals.carbs} target={targets.carbs} unit="g" colorClass="bg-rose-500" />
+              <Gauge label="Lipides" value={totals.fat} target={targets.fat} unit="g" colorClass="bg-sky-500" />
+            </div>
+          ) : (
+            <MacroDonut protein={totals.protein} carbs={totals.carbs} fat={totals.fat} />
+          )}
         </div>
 
         <div className="flex flex-col gap-4">
@@ -594,21 +819,22 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
               <div key={slot.type}>
                 <div className="flex items-center justify-between mb-2">
                   <h2 className="text-lg font-semibold">{slot.label}</h2>
-                  <button onClick={() => { setOpenSlot(slot.type); setMode("describe"); }} className="text-amber-500 font-mono text-sm">+ ajouter</button>
+                  <button onClick={() => { setOpenSlot(slot.type); setMode("describe"); setSearch(""); }} className="text-amber-500 font-mono text-sm">+ ajouter</button>
                 </div>
                 {slotMeals.length === 0 ? <p className="text-stone-600 text-sm">Rien noté</p> : (
                   <ul className="flex flex-col gap-2">
                     {slotMeals.map(m => editingId === m.id ? (
                       <EditMealForm key={m.id} meal={m} onCancel={() => setEditingId(null)} onSave={(updated) => { onEditMeal(updated); setEditingId(null); }} />
                     ) : (
-                      <li key={m.id} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between items-start">
-                        <div>
+                      <li key={m.id} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between items-start gap-3">
+                        {m.photo && <img src={m.photo} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0" />}
+                        <div className="flex-1">
                           <p className="font-medium">{m.description}</p>
                           <p className="font-mono text-xs text-stone-500">{m.calories} kcal · P{m.protein} G{m.carbs} L{m.fat}</p>
                         </div>
                         <div className="flex gap-2 shrink-0">
                           <button onClick={() => setEditingId(m.id)} className="text-stone-400 hover:text-amber-600 text-sm">✎</button>
-                          <button onClick={() => onRemoveMeal(m.id)} className="text-stone-400 hover:text-rose-500 text-sm">✕</button>
+                          <button onClick={() => removeMealWithUndo(m)} className="text-stone-400 hover:text-rose-500 text-sm">✕</button>
                         </div>
                       </li>
                     ))}
@@ -620,12 +846,12 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
         </div>
 
         {openSlot && (
-          <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center z-50 p-4">
+          <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center z-50 p-4" style={{ paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}>
             <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6 max-h-[85vh] overflow-y-auto">
               <h3 className="text-xl font-semibold mb-4">{SLOTS.find(s => s.type === openSlot)?.label}</h3>
 
               <div className="grid grid-cols-3 gap-1 bg-stone-200 rounded-xl p-1 mb-4">
-                {[["describe", "Décrire"], ["photo", "Photo"], ["quick", "Favoris/récents"]].map(([m, label]) => (
+                {[["describe", "Décrire"], ["photo", "Photo"], ["quick", "Favoris"]].map(([m, label]) => (
                   <button
                     key={m}
                     onClick={() => setMode(m)}
@@ -638,11 +864,7 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
 
               {mode === "describe" && (
                 <>
-                  <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Décris ce que tu as mangé..." rows={3} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-3" autoFocus />
-                  <label className="flex items-center gap-2 text-sm text-stone-600 mb-4">
-                    <input type="checkbox" checked={asFavorite} onChange={e => setAsFavorite(e.target.checked)} />
-                    Enregistrer comme favori
-                  </label>
+                  <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Décris ce que tu as mangé..." rows={3} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-4" autoFocus />
                   {error && <p className="text-rose-500 text-sm mb-3">{error}</p>}
                   <div className="flex gap-2">
                     <button onClick={closeModal} className="px-4 py-3 rounded-xl border border-stone-300">Annuler</button>
@@ -655,11 +877,7 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
 
               {mode === "photo" && (
                 <>
-                  <input type="file" accept="image/*" onChange={e => setPhoto(e.target.files?.[0] || null)} className="mb-3 text-sm w-full" />
-                  <label className="flex items-center gap-2 text-sm text-stone-600 mb-4">
-                    <input type="checkbox" checked={asFavorite} onChange={e => setAsFavorite(e.target.checked)} />
-                    Enregistrer comme favori
-                  </label>
+                  <input type="file" accept="image/*" onChange={e => setPhoto(e.target.files?.[0] || null)} className="mb-4 text-sm w-full" />
                   {error && <p className="text-rose-500 text-sm mb-3">{error}</p>}
                   <div className="flex gap-2">
                     <button onClick={closeModal} className="px-4 py-3 rounded-xl border border-stone-300">Annuler</button>
@@ -672,40 +890,69 @@ function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack,
 
               {mode === "quick" && (
                 <>
-                  {favorites.filter(f => f.type === openSlot).length > 0 && (
-                    <div className="mb-4">
-                      <p className="text-xs text-stone-500 mb-2">★ Favoris</p>
-                      <div className="flex flex-col gap-2">
-                        {favorites.filter(f => f.type === openSlot).map(f => (
-                          <button key={f.id} onClick={() => quickAdd(f)} className="text-left text-sm border border-stone-300 rounded-lg px-3 py-2 hover:border-amber-500">
-                            <span className="font-medium">{f.description}</span>
-                            <span className="block font-mono text-xs text-stone-500">{f.calories} kcal · P{f.protein} G{f.carbs} L{f.fat}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                    placeholder="Rechercher..."
+                    className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-4 text-sm"
+                  />
                   {(() => {
-                    const recent = computeRecent(allMeals, openSlot, favorites);
-                    return recent.length > 0 ? (
-                      <div className="mb-2">
-                        <p className="text-xs text-stone-500 mb-2">Récents</p>
-                        <div className="flex flex-col gap-2">
-                          {recent.map(m => (
-                            <button key={m.id} onClick={() => quickAdd(m)} className="text-left text-sm border border-stone-300 rounded-lg px-3 py-2 hover:border-amber-500">
-                              <span className="font-medium">{m.description}</span>
-                              <span className="block font-mono text-xs text-stone-500">{m.calories} kcal · P{m.protein} G{m.carbs} L{m.fat}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    ) : favorites.filter(f => f.type === openSlot).length === 0 ? (
-                      <p className="text-stone-500 text-sm mb-2">Rien à afficher pour l'instant — ajoute un repas via "Décrire" ou "Photo", il apparaîtra ici la prochaine fois.</p>
-                    ) : null;
+                    const q = search.trim().toLowerCase();
+                    const favs = favorites.filter(f => f.type === openSlot && f.description.toLowerCase().includes(q));
+                    const recent = computeRecent(allMeals, openSlot, favorites).filter(m => m.description.toLowerCase().includes(q));
+                    if (favs.length === 0 && recent.length === 0) {
+                      return <p className="text-stone-500 text-sm mb-2">{q ? "Rien ne correspond à ta recherche." : "Rien à afficher pour l'instant — ajoute un repas via \"Décrire\" ou \"Photo\", il apparaîtra ici la prochaine fois."}</p>;
+                    }
+                    return (
+                      <>
+                        {favs.length > 0 && (
+                          <div className="mb-4">
+                            <p className="text-xs text-stone-500 mb-2">★ Favoris</p>
+                            <div className="flex flex-col gap-2">
+                              {favs.map(f => (
+                                <div key={f.id} className="flex items-center gap-2">
+                                  <button onClick={() => quickAdd(f)} className="flex-1 text-left text-sm border border-stone-300 rounded-lg px-3 py-2 hover:border-amber-500">
+                                    <span className="font-medium">{f.description}</span>
+                                    <span className="block font-mono text-xs text-stone-500">{f.calories} kcal · P{f.protein} G{f.carbs} L{f.fat}</span>
+                                  </button>
+                                  <button onClick={() => onRemoveFavorite(f.id)} className="text-amber-500 text-lg px-1" title="Retirer des favoris">★</button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {recent.length > 0 && (
+                          <div className="mb-2">
+                            <p className="text-xs text-stone-500 mb-2">Récents</p>
+                            <div className="flex flex-col gap-2">
+                              {recent.map(m => (
+                                <div key={m.id} className="flex items-center gap-2">
+                                  <button onClick={() => quickAdd(m)} className="flex-1 text-left text-sm border border-stone-300 rounded-lg px-3 py-2 hover:border-amber-500">
+                                    <span className="font-medium">{m.description}</span>
+                                    <span className="block font-mono text-xs text-stone-500">{m.calories} kcal · P{m.protein} G{m.carbs} L{m.fat}</span>
+                                  </button>
+                                  <button onClick={() => onSaveFavorite(m)} className="text-stone-300 hover:text-amber-500 text-lg px-1" title="Ajouter aux favoris">☆</button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
                   })()}
                   <button onClick={closeModal} className="w-full mt-2 px-4 py-3 rounded-xl border border-stone-300">Fermer</button>
                 </>
               )}
+            </div>
+          </div>
+        )}
+
+        {undoMeal && (
+          <div className="fixed bottom-4 inset-x-4 z-50 flex justify-center">
+            <div className="bg-stone-900 text-stone-100 rounded-xl px-4 py-3 flex items-center gap-4 shadow-lg">
+              <span className="text-sm">Repas supprimé</span>
+              <button onClick={undoDelete} className="text-amber-400 font-medium text-sm">Annuler</button>
             </div>
           </div>
         )}
@@ -751,7 +998,7 @@ function App() {
     if (suggestion) setAdjustment(suggestion);
   }
 
-  if (!profile) return <Onboarding onDone={updateProfile} />;
+  if (!profile) return <Onboarding onDone={updateProfile} apiKey={apiKey} onSaveApiKey={updateApiKey} />;
 
   return (
     <>
@@ -798,14 +1045,17 @@ function App() {
           onRemoveMeal={(id) => updateMeals({ ...meals, [selectedDate]: (meals[selectedDate] || []).filter(m => m.id !== id) })}
           onEditMeal={(updated) => updateMeals({ ...meals, [selectedDate]: (meals[selectedDate] || []).map(m => m.id === updated.id ? updated : m) })}
           onSaveFavorite={(meal) => updateFavorites([...favorites, { id: `fav_${Date.now()}`, type: meal.type, description: meal.description, calories: meal.calories, protein: meal.protein, carbs: meal.carbs, fat: meal.fat }])}
+          onRemoveFavorite={(id) => updateFavorites(favorites.filter(f => f.id !== id))}
         />
       )}
 
       {view === "weight" && (
         <WeightPage
           weights={weights}
+          targetWeightKg={profile.targetWeightKg}
           onBack={() => setView("week")}
           onAdd={(date, kg) => updateWeights({ ...weights, [date]: kg })}
+          onUpdateTarget={(kg) => updateProfile({ ...profile, targetWeightKg: kg })}
         />
       )}
     </>
