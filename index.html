@@ -7,15 +7,35 @@
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#0c0a09" />
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
 <style>
   body { background:#0c0a09; }
+  #fallback { color:#a8a29e; font-family:monospace; font-size:13px; padding:24px; line-height:1.6; }
+  #fallback a { color:#d97706; }
 </style>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">
+  <div id="fallback">Chargement du Carnet...</div>
+</div>
+<script>
+  // Si les librairies n'ont pas pu se charger (mauvais réseau, bloqueur de contenu…),
+  // affiche un message clair au lieu d'un écran noir silencieux.
+  setTimeout(function () {
+    if (!window.React || !window.ReactDOM || !window.Babel) {
+      document.getElementById("fallback").innerHTML =
+        "Le chargement a échoué (React/Babel non disponibles).<br><br>" +
+        "Vérifie ta connexion internet et recharge la page.<br>" +
+        "Si ça persiste, désactive un éventuel bloqueur de contenu dans Safari pour ce site.";
+    }
+  }, 6000);
+  window.addEventListener("error", function (e) {
+    var el = document.getElementById("fallback");
+    if (el) el.innerHTML = "Erreur : " + (e.message || "inconnue") + "<br>Recharge la page.";
+  });
+</script>
 <script type="text/babel" data-presets="react">
 
 const { useState, useEffect, useMemo } = React;
