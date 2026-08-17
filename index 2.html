@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Le Carnet — suivi nutrition</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0c0a09" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { background:#0c0a09; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useState, useEffect, useMemo } = React;
+
+const GOALS = [
+  { value: "prise_de_muscle", label: "Prise de muscle", hint: "Léger surplus, riche en protéines" },
+  { value: "perte_de_poids", label: "Perte de poids", hint: "Léger déficit calorique" },
+  { value: "maintien", label: "Maintien", hint: "Équilibre autour de tes besoins" },
+];
+const ACTIVITY = [
+  ["sedentaire", "Sédentaire — peu ou pas de sport", 1.2],
+  ["modere", "Modéré — 2 à 3 séances / semaine", 1.375],
+  ["actif", "Actif — 4 à 5 séances / semaine", 1.55],
+  ["tres_actif", "Très actif — sport quotidien / physique", 1.725],
+];
+const SLOTS = [
+  { type: "petit_dejeuner", label: "Petit-déjeuner" },
+  { type: "dejeuner", label: "Déjeuner" },
+  { type: "diner", label: "Dîner" },
+  { type: "grignotage", label: "Grignotage" },
+];
+const WEEKDAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
+const GOAL_ADJ = { prise_de_muscle: 1.12, perte_de_poids: 0.82, maintien: 1 };
+
+function computeTargets({ sex, age, heightCm, weightKg, activity, goal }) {
+  const bmr = sex === "homme"
+    ? 10 * weightKg + 6.25 * heightCm - 5 * age + 5
+    : 10 * weightKg + 6.25 * heightCm - 5 * age - 161;
+  const factor = ACTIVITY.find(a => a[0] === activity)?.[2] || 1.375;
+  const calories = Math.round(bmr * factor * GOAL_ADJ[goal]);
+  const proteinPerKg = goal === "prise_de_muscle" ? 2.0 : goal === "perte_de_poids" ? 1.8 : 1.6;
+  const protein = Math.round(weightKg * proteinPerKg);
+  const fat = Math.round((calories * 0.28) / 9);
+  const carbs = Math.max(0, Math.round((calories - protein * 4 - fat * 9) / 4));
+  return { calories, protein, carbs, fat };
+}
+
+function pad(n) { return String(n).padStart(2, "0"); }
+function toKey(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+function todayKey() { return toKey(new Date()); }
+function mondayOf(date) {
+  const d = new Date(date);
+  const day = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - day);
+  return d;
+}
+function addDays(date, n) { const d = new Date(date); d.setDate(d.getDate() + n); return d; }
+
+function daysBetween(dateKeyA, dateKeyB) {
+  const a = new Date(dateKeyA + "T00:00:00");
+  const b = new Date(dateKeyB + "T00:00:00");
+  return Math.round((a - b) / 86400000);
+}
+
+function previousWeightEntry(weights, beforeKey) {
+  const entries = Object.entries(weights).filter(([k]) => k < beforeKey).sort(([a], [b]) => b.localeCompare(a));
+  return entries[0] || null;
+}
+
+/** Compare la pesée de la semaine à l'évolution attendue selon l'objectif, et propose un ajustement de calories */
+function suggestAdjustment(goal, prevEntry, currentKey, currentKg, currentTargets) {
+  if (!prevEntry) return null;
+  const [prevKey, prevKg] = prevEntry;
+  const days = daysBetween(currentKey, prevKey);
+  if (days < 4) return null; // trop récent pour être fiable
+  const pctChange = ((currentKg - prevKg) / prevKg) * 100;
+  const weeklyPct = pctChange * (7 / days);
+
+  let delta = 0;
+  let reason = "";
+  if (goal === "perte_de_poids") {
+    if (weeklyPct > -0.3) { delta = -150; reason = "Ton poids baisse trop lentement par rapport à l'objectif."; }
+    else if (weeklyPct < -1.2) { delta = 150; reason = "Ton poids baisse plus vite que recommandé."; }
+  } else if (goal === "prise_de_muscle") {
+    if (weeklyPct < 0.15) { delta = 150; reason = "Ta prise de poids est trop lente pour progresser."; }
+    else if (weeklyPct > 0.7) { delta = -100; reason = "Tu prends du poids plus vite que ce qui favorise le muscle (risque de prise de gras)."; }
+  } else {
+    if (weeklyPct > 0.5) { delta = -100; reason = "Ton poids a tendance à monter alors que l'objectif est le maintien."; }
+    else if (weeklyPct < -0.5) { delta = 100; reason = "Ton poids a tendance à baisser alors que l'objectif est le maintien."; }
+  }
+  if (delta === 0) return null;
+
+  const newCalories = Math.max(1200, currentTargets.calories + delta);
+  const fat = Math.round((newCalories * 0.28) / 9);
+  const protein = currentTargets.protein;
+  const carbs = Math.max(0, Math.round((newCalories - protein * 4 - fat * 9) / 4));
+  return { reason, delta, newTargets: { calories: newCalories, protein, carbs, fat } };
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function load(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function save(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
+async function analyzeMeal({ description, imageBase64, imageMediaType, apiKey }) {
+  if (!apiKey) throw new Error("Ajoute d'abord ta clé Gemini dans les réglages (icône ⚙).");
+  const parts = [];
+  const prompt = 'Tu es un nutritionniste expert. Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact : {"label": "nom court du repas", "calories": nombre, "protein": nombre_grammes, "carbs": nombre_grammes, "fat": nombre_grammes}. Donne ta meilleure estimation réaliste même si l\'information est incomplète.';
+  parts.push({ text: prompt });
+  if (description) parts.push({ text: `Description du repas : ${description}` });
+  if (imageBase64) parts.push({ inline_data: { mime_type: imageMediaType || "image/jpeg", data: imageBase64 } });
+
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0.2 } }),
+  });
+  if (!res.ok) throw new Error("L'analyse a échoué (vérifie ta clé Gemini dans les réglages).");
+  const data = await res.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const cleaned = rawText.replace(/```json|```/g, "").trim();
+  const parsed = JSON.parse(cleaned);
+  return {
+    label: parsed.label || "Repas",
+    calories: Math.round(parsed.calories) || 0,
+    protein: Math.round(parsed.protein) || 0,
+    carbs: Math.round(parsed.carbs) || 0,
+    fat: Math.round(parsed.fat) || 0,
+  };
+}
+
+function Gauge({ label, value, target, unit, colorClass }) {
+  const pct = target > 0 ? Math.min((value / target) * 100, 100) : 0;
+  return (
+    <div>
+      <div className="flex justify-between font-mono text-xs mb-1 text-stone-500">
+        <span>{label}</span>
+        <span>{Math.round(value)} / {target} {unit}</span>
+      </div>
+      <div className="h-2 rounded-full bg-stone-200 overflow-hidden">
+        <div className={`h-full rounded-full ${colorClass}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ apiKey, onSave, onClose }) {
+  const [value, setValue] = useState(apiKey || "");
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6">
+        <h3 className="text-xl font-semibold mb-2">Réglages</h3>
+        <p className="text-sm text-stone-500 mb-3">
+          Colle ta clé API Gemini (gratuite sur aistudio.google.com/apikey). Elle reste uniquement sur cet appareil.
+        </p>
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="Clé API Gemini"
+          className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-4 font-mono text-sm"
+        />
+        <div className="flex gap-2">
+          <button onClick={onClose} className="px-4 py-3 rounded-xl border border-stone-300">Fermer</button>
+          <button onClick={() => { onSave(value); onClose(); }} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">
+            Enregistrer
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeighModal({ onSave, onSkip }) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6">
+        <h3 className="text-xl font-semibold mb-2">Pesée du jour</h3>
+        <p className="text-sm text-stone-500 mb-4">C'est ton jour de pesée hebdomadaire. Note ton poids :</p>
+        <input
+          type="number" step="0.1"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="Poids en kg"
+          className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-4"
+        />
+        <div className="flex gap-2">
+          <button onClick={onSkip} className="px-4 py-3 rounded-xl border border-stone-300">Plus tard</button>
+          <button
+            disabled={!value}
+            onClick={() => onSave(Number(value))}
+            className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-40"
+          >
+            Enregistrer
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdjustmentModal({ suggestion, onAccept, onIgnore }) {
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6">
+        <h3 className="text-xl font-semibold mb-2">Ajustement suggéré</h3>
+        <p className="text-sm text-stone-600 mb-4">{suggestion.reason}</p>
+        <p className="font-mono text-sm mb-6">
+          Nouvel objectif : <span className="font-semibold">{suggestion.newTargets.calories} kcal/j</span>
+          {" "}({suggestion.delta > 0 ? "+" : ""}{suggestion.delta} kcal)
+        </p>
+        <div className="flex gap-2">
+          <button onClick={onIgnore} className="px-4 py-3 rounded-xl border border-stone-300">Ignorer</button>
+          <button onClick={onAccept} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Appliquer</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeightChart({ weights }) {
+  const entries = Object.entries(weights).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length < 2) {
+    return <p className="text-stone-500 text-sm">Note au moins 2 pesées pour voir la courbe.</p>;
+  }
+  const values = entries.map(([, v]) => v);
+  const min = Math.min(...values) - 0.5;
+  const max = Math.max(...values) + 0.5;
+  const w = 300, h = 100;
+  const points = entries.map(([, v], i) => {
+    const x = (i / (entries.length - 1)) * w;
+    const y = h - ((v - min) / (max - min)) * h;
+    return `${x},${y}`;
+  }).join(" ");
+  const last = entries[entries.length - 1][1];
+  const first = entries[0][1];
+  const delta = (last - first).toFixed(1);
+  return (
+    <div>
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-24">
+        <polyline points={points} fill="none" stroke="#d97706" strokeWidth="2" />
+      </svg>
+      <p className="font-mono text-xs text-stone-500 mt-1">
+        {first} kg → {last} kg ({delta > 0 ? "+" : ""}{delta} kg depuis le début du suivi)
+      </p>
+    </div>
+  );
+}
+
+function Onboarding({ onDone }) {
+  const [step, setStep] = useState(0);
+  const [goal, setGoal] = useState(null);
+  const [sex, setSex] = useState("homme");
+  const [age, setAge] = useState("");
+  const [heightCm, setHeightCm] = useState("");
+  const [weightKg, setWeightKg] = useState("");
+  const [activity, setActivity] = useState("modere");
+  const [weighDay, setWeighDay] = useState(0);
+
+  function finish() {
+    const targets = computeTargets({ sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, goal });
+    onDone({ goal, sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, targets, weighDay });
+  }
+
+  return (
+    <div className="min-h-screen bg-stone-950 flex items-center justify-center px-6">
+      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-8">
+        <p className="font-mono text-xs tracking-widest text-amber-600 uppercase mb-1">Étape {step + 1} / 4</p>
+
+        {step === 0 && (
+          <>
+            <h2 className="text-2xl font-bold mb-6">Quel est ton objectif ?</h2>
+            <div className="flex flex-col gap-3">
+              {GOALS.map(g => (
+                <button key={g.value} onClick={() => setGoal(g.value)}
+                  className={`text-left px-4 py-3 rounded-xl border ${goal === g.value ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300 hover:border-stone-500"}`}>
+                  <div className="font-medium">{g.label}</div>
+                  <div className="text-sm opacity-60">{g.hint}</div>
+                </button>
+              ))}
+            </div>
+            <button disabled={!goal} onClick={() => setStep(1)} className="mt-8 w-full bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
+          </>
+        )}
+
+        {step === 1 && (
+          <>
+            <h2 className="text-2xl font-bold mb-6">Un peu plus sur toi</h2>
+            <div className="flex gap-2 mb-4">
+              {["homme", "femme"].map(s => (
+                <button key={s} onClick={() => setSex(s)} className={`flex-1 py-2 rounded-lg border capitalize ${sex === s ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300"}`}>{s}</button>
+              ))}
+            </div>
+            <div className="grid grid-cols-3 gap-3 mb-4">
+              <input type="number" placeholder="Âge" value={age} onChange={e => setAge(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2" />
+              <input type="number" placeholder="Taille cm" value={heightCm} onChange={e => setHeightCm(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2" />
+              <input type="number" placeholder="Poids kg" value={weightKg} onChange={e => setWeightKg(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2" />
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setStep(0)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button disabled={!age || !heightCm || !weightKg} onClick={() => setStep(2)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
+            </div>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <h2 className="text-2xl font-bold mb-6">Ton niveau d'activité</h2>
+            <div className="flex flex-col gap-3 mb-8">
+              {ACTIVITY.map(([value, label]) => (
+                <button key={value} onClick={() => setActivity(value)} className={`text-left px-4 py-3 rounded-xl border ${activity === value ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300"}`}>{label}</button>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setStep(1)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={() => setStep(3)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
+            </div>
+          </>
+        )}
+
+        {step === 3 && (
+          <>
+            <h2 className="text-2xl font-bold mb-2">Ton jour de pesée</h2>
+            <p className="text-sm text-stone-500 mb-6">Chaque semaine, ce jour-là, l'app te demandera ton poids.</p>
+            <div className="grid grid-cols-2 gap-2 mb-8">
+              {WEEKDAYS.map((d, i) => (
+                <button key={i} onClick={() => setWeighDay(i)} className={`py-2 rounded-lg border text-sm ${weighDay === i ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300"}`}>{d}</button>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setStep(2)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={finish} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Créer mon carnet</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WeekView({ profile, meals, weights, weekStart, setWeekStart, onOpenDay, onEditProfile, onOpenSettings, onOpenWeight }) {
+  const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const target = profile.targets.calories;
+
+  const weekTotal = days.reduce((sum, d) => {
+    const dm = meals[toKey(d)] || [];
+    return sum + dm.reduce((s, m) => s + (m.calories || 0), 0);
+  }, 0);
+  const weekAvg = Math.round(weekTotal / 7);
+
+  const weekLabel = `${days[0].toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} – ${days[6].toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}`;
+
+  const latestWeight = Object.entries(weights).sort(([a], [b]) => b.localeCompare(a))[0];
+
+  return (
+    <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
+      <div className="max-w-lg mx-auto">
+        <header className="flex items-center justify-between mb-1">
+          <p className="font-mono text-xs tracking-widest text-amber-500 uppercase">{profile.goal.replace(/_/g, " ")}</p>
+          <div className="flex items-center gap-3">
+            <button onClick={onEditProfile} className="font-mono text-xs text-stone-500 underline">modifier</button>
+            <button onClick={onOpenSettings} className="text-stone-500 text-lg">⚙</button>
+          </div>
+        </header>
+        <h1 className="text-3xl font-black mb-1">{weekLabel}</h1>
+        <p className="font-mono text-xs text-stone-500 mb-6">
+          Moyenne : {weekAvg} / {target} kcal · jour
+        </p>
+
+        <div className="flex items-center justify-between mb-4">
+          <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="text-stone-500 hover:text-stone-100 px-2">← Semaine préc.</button>
+          <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="text-stone-500 hover:text-stone-100 px-2">Semaine suiv. →</button>
+        </div>
+
+        <div className="grid grid-cols-7 gap-1.5 mb-6">
+          {days.map((d, i) => {
+            const key = toKey(d);
+            const dm = meals[key] || [];
+            const total = dm.reduce((s, m) => s + (m.calories || 0), 0);
+            const ratio = total ? total / target : 0;
+            const fillClass = ratio === 0 ? "" : ratio < 0.85 ? "bg-emerald-500" : ratio <= 1.05 ? "bg-amber-500" : "bg-rose-500";
+            const isToday = key === todayKey();
+            return (
+              <button key={i} onClick={() => onOpenDay(key)}
+                className={`aspect-square rounded-lg bg-stone-100 text-stone-900 flex flex-col items-center justify-center relative overflow-hidden ${isToday ? "ring-2 ring-amber-500" : ""}`}>
+                <span className="font-mono text-[10px] text-stone-500 z-10">{WEEKDAYS[i].slice(0, 2)}</span>
+                <span className="font-mono text-sm z-10">{d.getDate()}</span>
+                {total > 0 && <div className={`absolute bottom-0 left-0 right-0 opacity-40 ${fillClass}`} style={{ height: `${Math.min(ratio, 1) * 100}%` }} />}
+              </button>
+            );
+          })}
+        </div>
+
+        <button onClick={onOpenWeight} className="w-full bg-stone-100 text-stone-900 rounded-2xl p-5 text-left mb-4">
+          <div className="flex justify-between items-center mb-2">
+            <h2 className="font-semibold">Suivi du poids</h2>
+            <span className="font-mono text-xs text-amber-600">voir tout →</span>
+          </div>
+          {latestWeight ? (
+            <p className="font-mono text-sm text-stone-600">Dernière pesée : {latestWeight[1]} kg</p>
+          ) : (
+            <p className="text-stone-500 text-sm">Pas encore de pesée enregistrée</p>
+          )}
+        </button>
+
+        <p className="text-stone-600 text-xs text-center">Vert = sous l'objectif · Or = dans la cible · Corail = dépassé</p>
+      </div>
+    </div>
+  );
+}
+
+function WeightPage({ weights, onBack, onAdd }) {
+  const [value, setValue] = useState("");
+  const [date, setDate] = useState(todayKey());
+  const entries = Object.entries(weights).sort(([a], [b]) => b.localeCompare(a));
+
+  return (
+    <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
+      <div className="max-w-lg mx-auto">
+        <button onClick={onBack} className="text-stone-500 text-sm mb-2">← Semaine</button>
+        <h1 className="text-3xl font-black mb-6">Suivi du poids</h1>
+
+        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+          <WeightChart weights={weights} />
+        </div>
+
+        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+          <h2 className="font-semibold mb-3">Ajouter une pesée</h2>
+          <div className="flex gap-2">
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+            <input type="number" step="0.1" placeholder="kg" value={value} onChange={e => setValue(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2 w-24" />
+            <button disabled={!value} onClick={() => { onAdd(date, Number(value)); setValue(""); }} className="bg-amber-500 text-stone-900 font-medium px-4 rounded-xl disabled:opacity-40">Ajouter</button>
+          </div>
+        </div>
+
+        <ul className="flex flex-col gap-2">
+          {entries.map(([d, v]) => (
+            <li key={d} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between">
+              <span className="font-mono text-sm">{new Date(d + "T00:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" })}</span>
+              <span className="font-mono text-sm font-medium">{v} kg</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function EditMealForm({ meal, onSave, onCancel }) {
+  const [calories, setCalories] = useState(meal.calories);
+  const [protein, setProtein] = useState(meal.protein);
+  const [carbs, setCarbs] = useState(meal.carbs);
+  const [fat, setFat] = useState(meal.fat);
+  return (
+    <div className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3">
+      <p className="font-medium mb-2">{meal.description}</p>
+      <div className="grid grid-cols-4 gap-2 mb-2">
+        <div><label className="text-xs text-stone-500">kcal</label><input type="number" value={calories} onChange={e => setCalories(Number(e.target.value))} className="w-full border border-stone-300 rounded px-2 py-1 text-sm" /></div>
+        <div><label className="text-xs text-stone-500">Prot.</label><input type="number" value={protein} onChange={e => setProtein(Number(e.target.value))} className="w-full border border-stone-300 rounded px-2 py-1 text-sm" /></div>
+        <div><label className="text-xs text-stone-500">Gluc.</label><input type="number" value={carbs} onChange={e => setCarbs(Number(e.target.value))} className="w-full border border-stone-300 rounded px-2 py-1 text-sm" /></div>
+        <div><label className="text-xs text-stone-500">Lip.</label><input type="number" value={fat} onChange={e => setFat(Number(e.target.value))} className="w-full border border-stone-300 rounded px-2 py-1 text-sm" /></div>
+      </div>
+      <div className="flex gap-2">
+        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg border border-stone-300 text-sm">Annuler</button>
+        <button onClick={() => onSave({ ...meal, calories, protein, carbs, fat })} className="flex-1 bg-amber-500 text-stone-900 font-medium py-1.5 rounded-lg text-sm">Enregistrer</button>
+      </div>
+    </div>
+  );
+}
+
+/** Repas récents pour un créneau donné : dérivés de l'historique, dédupliqués, sans les favoris déjà proposés */
+function computeRecent(meals, type, favorites) {
+  const favDescriptions = new Set(favorites.filter(f => f.type === type).map(f => f.description));
+  const all = Object.values(meals).flat().filter(m => m.type === type && !favDescriptions.has(m.description));
+  const seen = new Set();
+  const recent = [];
+  for (const m of [...all].sort((a, b) => Number(b.id) - Number(a.id))) {
+    if (seen.has(m.description)) continue;
+    seen.add(m.description);
+    recent.push(m);
+    if (recent.length >= 6) break;
+  }
+  return recent;
+}
+
+function DayView({ date, targets, dayMeals, allMeals, favorites, apiKey, onBack, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite }) {
+  const [openSlot, setOpenSlot] = useState(null);
+  const [mode, setMode] = useState("describe");
+  const [text, setText] = useState("");
+  const [photo, setPhoto] = useState(null);
+  const [asFavorite, setAsFavorite] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [editingId, setEditingId] = useState(null);
+
+  const totals = useMemo(() => dayMeals.reduce((acc, m) => ({
+    calories: acc.calories + (m.calories || 0),
+    protein: acc.protein + (m.protein || 0),
+    carbs: acc.carbs + (m.carbs || 0),
+    fat: acc.fat + (m.fat || 0),
+  }), { calories: 0, protein: 0, carbs: 0, fat: 0 }), [dayMeals]);
+
+  const niceDate = new Date(date + "T00:00:00").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+
+  async function submit() {
+    if (!openSlot || (!text.trim() && !photo)) return;
+    setLoading(true);
+    setError("");
+    try {
+      let imageBase64 = null, imageMediaType = null;
+      if (photo) { imageBase64 = await fileToBase64(photo); imageMediaType = photo.type; }
+      const result = await analyzeMeal({ description: text, imageBase64, imageMediaType, apiKey });
+      const meal = { id: `${Date.now()}`, type: openSlot, description: text || result.label, calories: result.calories, protein: result.protein, carbs: result.carbs, fat: result.fat };
+      onAddMeal(meal);
+      if (asFavorite) onSaveFavorite(meal);
+      setOpenSlot(null); setText(""); setPhoto(null); setAsFavorite(false);
+    } catch (e) {
+      setError(e.message || "Erreur inconnue");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function quickAdd(mealLike) {
+    onAddMeal({ ...mealLike, id: `${Date.now()}`, type: openSlot });
+    setOpenSlot(null);
+    setMode("describe");
+  }
+
+  function closeModal() {
+    setOpenSlot(null); setText(""); setPhoto(null); setError(""); setAsFavorite(false); setMode("describe");
+  }
+
+  return (
+    <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
+      <div className="max-w-lg mx-auto">
+        <button onClick={onBack} className="text-stone-500 text-sm mb-2">← Semaine</button>
+        <h1 className="text-3xl font-black capitalize mb-6">{niceDate}</h1>
+
+        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6 flex flex-col gap-3">
+          <Gauge label="Calories" value={totals.calories} target={targets.calories} unit="kcal" colorClass="bg-amber-500" />
+          <Gauge label="Protéines" value={totals.protein} target={targets.protein} unit="g" colorClass="bg-emerald-500" />
+          <Gauge label="Glucides" value={totals.carbs} target={targets.carbs} unit="g" colorClass="bg-rose-500" />
+          <Gauge label="Lipides" value={totals.fat} target={targets.fat} unit="g" colorClass="bg-sky-500" />
+        </div>
+
+        <div className="flex flex-col gap-4">
+          {SLOTS.map(slot => {
+            const slotMeals = dayMeals.filter(m => m.type === slot.type);
+            return (
+              <div key={slot.type}>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-lg font-semibold">{slot.label}</h2>
+                  <button onClick={() => { setOpenSlot(slot.type); setMode("describe"); }} className="text-amber-500 font-mono text-sm">+ ajouter</button>
+                </div>
+                {slotMeals.length === 0 ? <p className="text-stone-600 text-sm">Rien noté</p> : (
+                  <ul className="flex flex-col gap-2">
+                    {slotMeals.map(m => editingId === m.id ? (
+                      <EditMealForm key={m.id} meal={m} onCancel={() => setEditingId(null)} onSave={(updated) => { onEditMeal(updated); setEditingId(null); }} />
+                    ) : (
+                      <li key={m.id} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between items-start">
+                        <div>
+                          <p className="font-medium">{m.description}</p>
+                          <p className="font-mono text-xs text-stone-500">{m.calories} kcal · P{m.protein} G{m.carbs} L{m.fat}</p>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <button onClick={() => setEditingId(m.id)} className="text-stone-400 hover:text-amber-600 text-sm">✎</button>
+                          <button onClick={() => onRemoveMeal(m.id)} className="text-stone-400 hover:text-rose-500 text-sm">✕</button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {openSlot && (
+          <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center z-50 p-4">
+            <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6 max-h-[85vh] overflow-y-auto">
+              <h3 className="text-xl font-semibold mb-4">{SLOTS.find(s => s.type === openSlot)?.label}</h3>
+
+              <div className="grid grid-cols-3 gap-1 bg-stone-200 rounded-xl p-1 mb-4">
+                {[["describe", "Décrire"], ["photo", "Photo"], ["quick", "Favoris/récents"]].map(([m, label]) => (
+                  <button
+                    key={m}
+                    onClick={() => setMode(m)}
+                    className={`py-2 rounded-lg text-xs font-medium ${mode === m ? "bg-stone-900 text-stone-100" : "text-stone-600"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {mode === "describe" && (
+                <>
+                  <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Décris ce que tu as mangé..." rows={3} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-3" autoFocus />
+                  <label className="flex items-center gap-2 text-sm text-stone-600 mb-4">
+                    <input type="checkbox" checked={asFavorite} onChange={e => setAsFavorite(e.target.checked)} />
+                    Enregistrer comme favori
+                  </label>
+                  {error && <p className="text-rose-500 text-sm mb-3">{error}</p>}
+                  <div className="flex gap-2">
+                    <button onClick={closeModal} className="px-4 py-3 rounded-xl border border-stone-300">Annuler</button>
+                    <button onClick={submit} disabled={loading || !text.trim()} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-40">
+                      {loading ? "Analyse en cours..." : "Analyser & ajouter"}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {mode === "photo" && (
+                <>
+                  <input type="file" accept="image/*" onChange={e => setPhoto(e.target.files?.[0] || null)} className="mb-3 text-sm w-full" />
+                  <label className="flex items-center gap-2 text-sm text-stone-600 mb-4">
+                    <input type="checkbox" checked={asFavorite} onChange={e => setAsFavorite(e.target.checked)} />
+                    Enregistrer comme favori
+                  </label>
+                  {error && <p className="text-rose-500 text-sm mb-3">{error}</p>}
+                  <div className="flex gap-2">
+                    <button onClick={closeModal} className="px-4 py-3 rounded-xl border border-stone-300">Annuler</button>
+                    <button onClick={submit} disabled={loading || !photo} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-40">
+                      {loading ? "Analyse en cours..." : "Analyser & ajouter"}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {mode === "quick" && (
+                <>
+                  {favorites.filter(f => f.type === openSlot).length > 0 && (
+                    <div className="mb-4">
+                      <p className="text-xs text-stone-500 mb-2">★ Favoris</p>
+                      <div className="flex flex-col gap-2">
+                        {favorites.filter(f => f.type === openSlot).map(f => (
+                          <button key={f.id} onClick={() => quickAdd(f)} className="text-left text-sm border border-stone-300 rounded-lg px-3 py-2 hover:border-amber-500">
+                            <span className="font-medium">{f.description}</span>
+                            <span className="block font-mono text-xs text-stone-500">{f.calories} kcal · P{f.protein} G{f.carbs} L{f.fat}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {(() => {
+                    const recent = computeRecent(allMeals, openSlot, favorites);
+                    return recent.length > 0 ? (
+                      <div className="mb-2">
+                        <p className="text-xs text-stone-500 mb-2">Récents</p>
+                        <div className="flex flex-col gap-2">
+                          {recent.map(m => (
+                            <button key={m.id} onClick={() => quickAdd(m)} className="text-left text-sm border border-stone-300 rounded-lg px-3 py-2 hover:border-amber-500">
+                              <span className="font-medium">{m.description}</span>
+                              <span className="block font-mono text-xs text-stone-500">{m.calories} kcal · P{m.protein} G{m.carbs} L{m.fat}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : favorites.filter(f => f.type === openSlot).length === 0 ? (
+                      <p className="text-stone-500 text-sm mb-2">Rien à afficher pour l'instant — ajoute un repas via "Décrire" ou "Photo", il apparaîtra ici la prochaine fois.</p>
+                    ) : null;
+                  })()}
+                  <button onClick={closeModal} className="w-full mt-2 px-4 py-3 rounded-xl border border-stone-300">Fermer</button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [profile, setProfile] = useState(() => load("nutri_profile", null));
+  const [meals, setMeals] = useState(() => load("nutri_meals", {}));
+  const [weights, setWeights] = useState(() => load("nutri_weights", {}));
+  const [favorites, setFavorites] = useState(() => load("nutri_favorites", []));
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("nutri_gemini_key") || "");
+  const [view, setView] = useState("week");
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
+  const [showSettings, setShowSettings] = useState(false);
+  const [showWeigh, setShowWeigh] = useState(false);
+  const [adjustment, setAdjustment] = useState(null);
+
+  useEffect(() => {
+    if (!profile) return;
+    const today = new Date();
+    const isWeighDay = (today.getDay() + 6) % 7 === profile.weighDay;
+    const alreadyLogged = weights[todayKey()] !== undefined;
+    if (isWeighDay && !alreadyLogged) setShowWeigh(true);
+  }, [profile]);
+
+  function updateProfile(p) { setProfile(p); save("nutri_profile", p); }
+  function updateMeals(m) { setMeals(m); save("nutri_meals", m); }
+  function updateWeights(w) { setWeights(w); save("nutri_weights", w); }
+  function updateFavorites(f) { setFavorites(f); save("nutri_favorites", f); }
+  function updateApiKey(k) { setApiKey(k); localStorage.setItem("nutri_gemini_key", k); }
+
+  function recordWeight(kg) {
+    const key = todayKey();
+    const prevEntry = previousWeightEntry(weights, key);
+    const nextWeights = { ...weights, [key]: kg };
+    updateWeights(nextWeights);
+    setShowWeigh(false);
+    const suggestion = suggestAdjustment(profile.goal, prevEntry, key, kg, profile.targets);
+    if (suggestion) setAdjustment(suggestion);
+  }
+
+  if (!profile) return <Onboarding onDone={updateProfile} />;
+
+  return (
+    <>
+      {showSettings && <SettingsModal apiKey={apiKey} onSave={updateApiKey} onClose={() => setShowSettings(false)} />}
+      {showWeigh && (
+        <WeighModal
+          onSkip={() => setShowWeigh(false)}
+          onSave={recordWeight}
+        />
+      )}
+
+      {adjustment && (
+        <AdjustmentModal
+          suggestion={adjustment}
+          onIgnore={() => setAdjustment(null)}
+          onAccept={() => { updateProfile({ ...profile, targets: adjustment.newTargets }); setAdjustment(null); }}
+        />
+      )}
+
+      {view === "week" && (
+        <WeekView
+          profile={profile}
+          meals={meals}
+          weights={weights}
+          weekStart={weekStart}
+          setWeekStart={setWeekStart}
+          onOpenDay={(d) => { setSelectedDate(d); setView("day"); }}
+          onEditProfile={() => updateProfile(null)}
+          onOpenSettings={() => setShowSettings(true)}
+          onOpenWeight={() => setView("weight")}
+        />
+      )}
+
+      {view === "day" && selectedDate && (
+        <DayView
+          date={selectedDate}
+          targets={profile.targets}
+          dayMeals={meals[selectedDate] || []}
+          allMeals={meals}
+          favorites={favorites}
+          apiKey={apiKey}
+          onBack={() => setView("week")}
+          onAddMeal={(meal) => updateMeals({ ...meals, [selectedDate]: [...(meals[selectedDate] || []), meal] })}
+          onRemoveMeal={(id) => updateMeals({ ...meals, [selectedDate]: (meals[selectedDate] || []).filter(m => m.id !== id) })}
+          onEditMeal={(updated) => updateMeals({ ...meals, [selectedDate]: (meals[selectedDate] || []).map(m => m.id === updated.id ? updated : m) })}
+          onSaveFavorite={(meal) => updateFavorites([...favorites, { id: `fav_${Date.now()}`, type: meal.type, description: meal.description, calories: meal.calories, protein: meal.protein, carbs: meal.carbs, fat: meal.fat }])}
+        />
+      )}
+
+      {view === "weight" && (
+        <WeightPage
+          weights={weights}
+          onBack={() => setView("week")}
+          onAdd={(date, kg) => updateWeights({ ...weights, [date]: kg })}
+        />
+      )}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
