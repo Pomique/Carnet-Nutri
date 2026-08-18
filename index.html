@@ -200,6 +200,17 @@ function computeStreak(meals, targetCalories) {
   return streak;
 }
 
+/** Calories totales des 7 derniers jours (jour affiché inclus), pour la tendance */
+function computeWeeklyTrend(meals, endDateKey) {
+  const end = new Date(endDateKey + "T00:00:00");
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = addDays(end, i - 6);
+    const key = toKey(d);
+    const total = (meals[key] || []).reduce((s, m) => s + (m.calories || 0), 0);
+    return { key, label: WEEKDAYS[(d.getDay() + 6) % 7].slice(0, 2), total };
+  });
+}
+
 function load(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -260,17 +271,21 @@ function Gauge({ label, value, target, unit, colorClass }) {
   );
 }
 
-function MacroDonut({ protein, carbs, fat }) {
+function MacroDonut({ protein, carbs, fat, targets }) {
   const pCal = protein * 4, cCal = carbs * 4, fCal = fat * 9;
   const total = pCal + cCal + fCal;
   const r = 45, cx = 60, cy = 60, circumference = 2 * Math.PI * r;
+
+  const idealTotal = targets ? targets.protein * 4 + targets.carbs * 4 + targets.fat * 9 : 0;
+  const idealPct = (grams, kcalPerG) => (targets && idealTotal > 0 ? Math.round((grams * kcalPerG / idealTotal) * 100) : null);
+
   if (total === 0) {
     return <p className="text-stone-500 text-sm text-center py-8">Rien noté aujourd'hui pour l'instant.</p>;
   }
   const segments = [
-    { label: "Protéines", value: pCal, color: "#10b981" },
-    { label: "Glucides", value: cCal, color: "#f43f5e" },
-    { label: "Lipides", value: fCal, color: "#0ea5e9" },
+    { label: "Protéines", value: pCal, color: "#10b981", idealPct: idealPct(targets?.protein || 0, 4) },
+    { label: "Glucides", value: cCal, color: "#f43f5e", idealPct: idealPct(targets?.carbs || 0, 4) },
+    { label: "Lipides", value: fCal, color: "#0ea5e9", idealPct: idealPct(targets?.fat || 0, 9) },
   ];
   let offset = 0;
   return (
@@ -299,9 +314,11 @@ function MacroDonut({ protein, carbs, fat }) {
       <div className="flex flex-col gap-2">
         {segments.map((s, i) => (
           <div key={i} className="flex items-center gap-2 text-sm">
-            <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />
+            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
             <span>{s.label}</span>
-            <span className="font-mono text-xs text-stone-500">{Math.round((s.value / total) * 100)}%</span>
+            <span className="font-mono text-xs text-stone-500">
+              {Math.round((s.value / total) * 100)}%{s.idealPct !== null ? ` (cible ~${s.idealPct}%)` : ""}
+            </span>
           </div>
         ))}
       </div>
@@ -667,7 +684,99 @@ function computeRecent(meals, type, favorites) {
   return recent;
 }
 
-function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey, onNavigateDay, onEditProfile, onOpenSettings, onOpenWeight, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite }) {
+function WeeklyTrend({ meals, endDateKey, target }) {
+  const days = computeWeeklyTrend(meals, endDateKey);
+  const max = Math.max(target, ...days.map(d => d.total)) || 1;
+  return (
+    <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+      <h2 className="font-semibold mb-4">Tendance 7 jours</h2>
+      <div className="flex items-end justify-between gap-2 h-28">
+        {days.map((d, i) => {
+          const h = Math.min((d.total / max) * 100, 100);
+          const isEnd = d.key === endDateKey;
+          const ratio = d.total ? d.total / target : 0;
+          const barColor = d.total === 0 ? "bg-stone-200" : ratio <= 1.05 ? "bg-emerald-500" : "bg-rose-500";
+          return (
+            <div key={i} className="flex-1 flex flex-col items-center justify-end h-full">
+              <div className={`w-full rounded-t-md ${barColor} ${isEnd ? "ring-2 ring-amber-500" : ""}`} style={{ height: `${h}%`, minHeight: d.total ? "4px" : "2px" }} />
+              <span className="font-mono text-[10px] text-stone-500 mt-1">{d.label}</span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="font-mono text-xs text-stone-500 mt-3">Cible : {target} kcal/j</p>
+    </div>
+  );
+}
+
+function WaterTracker({ count, onSet }) {
+  const target = 8;
+  return (
+    <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold">Eau</h2>
+        <span className="font-mono text-xs text-stone-500">{count} / {target} verres</span>
+      </div>
+      <div className="flex items-center gap-3">
+        <button onClick={() => onSet(count - 1)} disabled={count <= 0} className="w-10 h-10 rounded-full border border-stone-300 text-lg disabled:opacity-30">−</button>
+        <div className="flex-1 flex gap-1">
+          {Array.from({ length: target }, (_, i) => (
+            <div key={i} className={`flex-1 h-6 rounded ${i < count ? "bg-sky-500" : "bg-stone-200"}`} />
+          ))}
+        </div>
+        <button onClick={() => onSet(count + 1)} className="w-10 h-10 rounded-full border border-stone-300 text-lg">+</button>
+      </div>
+    </div>
+  );
+}
+
+function ExerciseSection({ exercises, onAdd, onRemove }) {
+  const [open, setOpen] = useState(false);
+  const [description, setDescription] = useState("");
+  const [calories, setCalories] = useState("");
+
+  function add() {
+    if (!calories) return;
+    onAdd({ id: `${Date.now()}`, description: description || "Séance de sport", calories: Number(calories) });
+    setDescription(""); setCalories(""); setOpen(false);
+  }
+
+  return (
+    <div className="mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-lg font-semibold">Sport</h2>
+        <button onClick={() => setOpen(v => !v)} className="text-amber-500 font-mono text-sm">+ ajouter</button>
+      </div>
+      {exercises.length === 0 && !open ? (
+        <p className="text-stone-600 text-sm">Rien noté</p>
+      ) : (
+        <ul className="flex flex-col gap-2 mb-2">
+          {exercises.map(ex => (
+            <li key={ex.id} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between items-center">
+              <span className="font-medium">{ex.description}</span>
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-xs text-emerald-600">+{ex.calories} kcal</span>
+                <button onClick={() => onRemove(ex.id)} className="text-stone-400 hover:text-rose-500 text-sm">✕</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {open && (
+        <div className="bg-stone-100 text-stone-900 rounded-xl p-4 flex flex-col gap-2">
+          <input type="text" placeholder="Type d'activité (optionnel)" value={description} onChange={e => setDescription(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+          <input type="number" placeholder="Calories brûlées" value={calories} onChange={e => setCalories(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+          <div className="flex gap-2">
+            <button onClick={() => setOpen(false)} className="px-3 py-2 rounded-lg border border-stone-300 text-sm">Annuler</button>
+            <button onClick={add} disabled={!calories} className="flex-1 bg-amber-500 text-stone-900 font-medium py-2 rounded-lg text-sm disabled:opacity-40">Ajouter</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey, onNavigateDay, onGoToday, onEditProfile, onOpenSettings, onOpenWeight, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite, waterCount, onSetWater, dayExercises, onAddExercise, onRemoveExercise }) {
   const [openSlot, setOpenSlot] = useState(null);
   const [mode, setMode] = useState("describe");
   const [text, setText] = useState("");
@@ -692,6 +801,8 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
   const niceDate = new Date(date + "T00:00:00").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   const streak = useMemo(() => computeStreak(allMeals, targets.calories), [allMeals, targets.calories]);
   const latestWeight = useMemo(() => Object.entries(weights).sort(([a], [b]) => b.localeCompare(a))[0], [weights]);
+  const exerciseCalories = dayExercises.reduce((s, ex) => s + (ex.calories || 0), 0);
+  const effectiveCalorieTarget = targets.calories + exerciseCalories;
 
   async function submit() {
     if (!openSlot || (!text.trim() && !photo)) return;
@@ -757,6 +868,12 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
           <button onClick={() => onNavigateDay(1)} className="text-stone-500 hover:text-stone-100 text-xl px-2">→</button>
         </div>
 
+        {date !== todayKey() && (
+          <div className="text-center mb-1">
+            <button onClick={onGoToday} className="font-mono text-xs text-amber-500 underline">Revenir à aujourd'hui</button>
+          </div>
+        )}
+
         {streak > 0 && (
           <p className="text-center font-mono text-xs text-amber-500 mb-6">🔥 {streak} jour{streak > 1 ? "s" : ""} d'affilée dans l'objectif</p>
         )}
@@ -787,17 +904,23 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
             <span className="font-mono text-xs text-stone-400 uppercase tracking-wide">{macroView === "gauges" ? "Jauges" : "Répartition"}</span>
             <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">→</button>
           </div>
-          {macroView === "gauges" ? (
-            <div className="flex flex-col gap-3">
-              <Gauge label="Calories" value={totals.calories} target={targets.calories} unit="kcal" colorClass="bg-amber-500" />
-              <Gauge label="Protéines" value={totals.protein} target={targets.protein} unit="g" colorClass="bg-emerald-500" />
-              <Gauge label="Glucides" value={totals.carbs} target={targets.carbs} unit="g" colorClass="bg-rose-500" />
-              <Gauge label="Lipides" value={totals.fat} target={targets.fat} unit="g" colorClass="bg-sky-500" />
-            </div>
-          ) : (
-            <MacroDonut protein={totals.protein} carbs={totals.carbs} fat={totals.fat} />
-          )}
+          <div className="min-h-[210px] flex flex-col justify-center">
+            {macroView === "gauges" ? (
+              <div className="flex flex-col gap-3">
+                <Gauge label={exerciseCalories > 0 ? `Calories (+${exerciseCalories} sport)` : "Calories"} value={totals.calories} target={effectiveCalorieTarget} unit="kcal" colorClass="bg-amber-500" />
+                <Gauge label="Protéines" value={totals.protein} target={targets.protein} unit="g" colorClass="bg-emerald-500" />
+                <Gauge label="Glucides" value={totals.carbs} target={targets.carbs} unit="g" colorClass="bg-rose-500" />
+                <Gauge label="Lipides" value={totals.fat} target={targets.fat} unit="g" colorClass="bg-sky-500" />
+              </div>
+            ) : (
+              <MacroDonut protein={totals.protein} carbs={totals.carbs} fat={totals.fat} targets={targets} />
+            )}
+          </div>
         </div>
+
+        <WeeklyTrend meals={allMeals} endDateKey={date} target={targets.calories} />
+        <WaterTracker count={waterCount} onSet={onSetWater} />
+        <ExerciseSection exercises={dayExercises} onAdd={onAddExercise} onRemove={onRemoveExercise} />
 
         <div className="flex flex-col gap-4">
           {SLOTS.map(slot => {
@@ -953,6 +1076,8 @@ function App() {
   const [meals, setMeals] = useState(() => load("nutri_meals", {}));
   const [weights, setWeights] = useState(() => load("nutri_weights", {}));
   const [favorites, setFavorites] = useState(() => load("nutri_favorites", []));
+  const [water, setWater] = useState(() => load("nutri_water", {}));
+  const [exercises, setExercises] = useState(() => load("nutri_exercises", {}));
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("nutri_gemini_key") || "");
   const [view, setView] = useState("day");
   const [selectedDate, setSelectedDate] = useState(() => todayKey());
@@ -973,6 +1098,8 @@ function App() {
   function updateWeights(w) { setWeights(w); save("nutri_weights", w); }
   function updateFavorites(f) { setFavorites(f); save("nutri_favorites", f); }
   function updateApiKey(k) { setApiKey(k); localStorage.setItem("nutri_gemini_key", k); }
+  function updateWater(w) { setWater(w); save("nutri_water", w); }
+  function updateExercises(e) { setExercises(e); save("nutri_exercises", e); }
 
   function recordWeight(kg) {
     const key = todayKey();
@@ -1014,6 +1141,7 @@ function App() {
           favorites={favorites}
           apiKey={apiKey}
           onNavigateDay={(delta) => setSelectedDate(toKey(addDays(new Date(selectedDate + "T00:00:00"), delta)))}
+          onGoToday={() => setSelectedDate(todayKey())}
           onEditProfile={() => updateProfile(null)}
           onOpenSettings={() => setShowSettings(true)}
           onOpenWeight={() => setView("weight")}
@@ -1022,6 +1150,11 @@ function App() {
           onEditMeal={(updated) => updateMeals({ ...meals, [selectedDate]: (meals[selectedDate] || []).map(m => m.id === updated.id ? updated : m) })}
           onSaveFavorite={(meal) => updateFavorites([...favorites, { id: `fav_${Date.now()}`, type: meal.type, description: meal.description, calories: meal.calories, protein: meal.protein, carbs: meal.carbs, fat: meal.fat }])}
           onRemoveFavorite={(id) => updateFavorites(favorites.filter(f => f.id !== id))}
+          waterCount={water[selectedDate] || 0}
+          onSetWater={(n) => updateWater({ ...water, [selectedDate]: Math.max(0, n) })}
+          dayExercises={exercises[selectedDate] || []}
+          onAddExercise={(ex) => updateExercises({ ...exercises, [selectedDate]: [...(exercises[selectedDate] || []), ex] })}
+          onRemoveExercise={(id) => updateExercises({ ...exercises, [selectedDate]: (exercises[selectedDate] || []).filter(e => e.id !== id) })}
         />
       )}
 
