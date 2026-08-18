@@ -408,13 +408,28 @@ function MacroDonut({ protein, carbs, fat, targets }) {
   );
 }
 
-function SettingsModal({ apiKey, onSaveApiKey, profile, onUpdateProfile, onResetProfile, onClose }) {
+function SettingsModal({ apiKey, onSaveApiKey, profile, weights, onUpdateProfile, onResetProfile, onClose }) {
   const [keyValue, setKeyValue] = useState(apiKey || "");
   const [keySaved, setKeySaved] = useState(false);
   const [targetInput, setTargetInput] = useState(profile.targetWeightKg || "");
   const [goalDescInput, setGoalDescInput] = useState(profile.goalDescription || "");
   const [recalculating, setRecalculating] = useState(false);
   const [recalcError, setRecalcError] = useState("");
+  const [pendingResult, setPendingResult] = useState(null);
+
+  const latestWeightEntry = Object.entries(weights || {}).sort(([a], [b]) => b.localeCompare(a))[0];
+  const referenceWeight = latestWeightEntry ? latestWeightEntry[1] : profile.weightKg;
+  const targetWarning = (() => {
+    if (!targetInput) return null;
+    const t = Number(targetInput);
+    if (profile.goalDirection === "perte" && t >= referenceWeight) {
+      return "Ton objectif est une perte de poids, mais ce poids cible est égal ou supérieur à ton poids actuel.";
+    }
+    if (profile.goalDirection === "prise" && t <= referenceWeight) {
+      return "Ton objectif est une prise de poids, mais ce poids cible est égal ou inférieur à ton poids actuel.";
+    }
+    return null;
+  })();
 
   function saveTarget() {
     onUpdateProfile({ targetWeightKg: targetInput ? Number(targetInput) : null });
@@ -424,22 +439,28 @@ function SettingsModal({ apiKey, onSaveApiKey, profile, onUpdateProfile, onReset
     if (!goalDescInput.trim()) return;
     setRecalculating(true);
     setRecalcError("");
+    setPendingResult(null);
     try {
       const result = await analyzeGoal({
         sex: profile.sex, age: profile.age, heightCm: profile.heightCm, weightKg: profile.weightKg,
         activity: profile.activity, description: goalDescInput, apiKey: keyValue,
       });
-      onUpdateProfile({
-        goal: result.label,
-        goalDescription: goalDescInput,
-        goalDirection: result.direction,
-        targets: { calories: result.calories, protein: result.protein, carbs: result.carbs, fat: result.fat },
-      });
+      setPendingResult(result);
     } catch (e) {
       setRecalcError(e.message || "Erreur inconnue");
     } finally {
       setRecalculating(false);
     }
+  }
+
+  function applyPending() {
+    onUpdateProfile({
+      goal: pendingResult.label,
+      goalDescription: goalDescInput,
+      goalDirection: pendingResult.direction,
+      targets: { calories: pendingResult.calories, protein: pendingResult.protein, carbs: pendingResult.carbs, fat: pendingResult.fat },
+    });
+    setPendingResult(null);
   }
 
   return (
@@ -451,21 +472,39 @@ function SettingsModal({ apiKey, onSaveApiKey, profile, onUpdateProfile, onReset
         <p className="font-medium mb-3">{profile.goal}</p>
         <textarea
           value={goalDescInput}
-          onChange={e => setGoalDescInput(e.target.value)}
+          onChange={e => { setGoalDescInput(e.target.value); setPendingResult(null); }}
+          onFocus={e => setTimeout(() => e.target.scrollIntoView({ behavior: "smooth", block: "center" }), 300)}
           placeholder="Décris ce que tu veux faire..."
           rows={3}
           className="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm mb-2"
         />
         {recalcError && <p className="text-rose-500 text-xs mb-2">{recalcError}</p>}
-        <button onClick={recalculate} disabled={recalculating || !goalDescInput.trim()} className="w-full bg-stone-900 text-stone-100 font-medium py-2 rounded-xl text-sm mb-5 disabled:opacity-40">
-          {recalculating ? "Recalcul en cours..." : "Recalculer avec l'IA"}
-        </button>
+
+        {pendingResult ? (
+          <div className="bg-stone-200/60 rounded-xl p-4 mb-5 font-mono text-sm flex flex-col gap-1">
+            <p className="font-sans font-semibold mb-1">{pendingResult.label}</p>
+            <div className="flex justify-between"><span>Calories</span><span className="font-semibold">{pendingResult.calories} kcal</span></div>
+            <div className="flex justify-between"><span>Protéines</span><span className="font-semibold">{pendingResult.protein} g</span></div>
+            <div className="flex justify-between"><span>Glucides</span><span className="font-semibold">{pendingResult.carbs} g</span></div>
+            <div className="flex justify-between"><span>Lipides</span><span className="font-semibold">{pendingResult.fat} g</span></div>
+            <div className="flex gap-2 mt-3">
+              <button onClick={() => setPendingResult(null)} className="flex-1 px-3 py-2 rounded-lg border border-stone-400 text-sm font-sans">Annuler</button>
+              <button onClick={applyPending} className="flex-1 bg-amber-500 text-stone-900 font-medium py-2 rounded-lg text-sm font-sans">Appliquer</button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={recalculate} disabled={recalculating || !goalDescInput.trim()} className="w-full bg-stone-900 text-stone-100 font-medium py-2 rounded-xl text-sm mb-5 disabled:opacity-40">
+            {recalculating ? "Recalcul en cours..." : "Recalculer avec l'IA"}
+          </button>
+        )}
 
         <p className="text-xs text-stone-500 uppercase tracking-wide mb-2">Poids cible</p>
-        <div className="flex gap-2 mb-5">
+        <div className="flex gap-2 mb-2">
           <input type="number" step="0.1" placeholder="kg" value={targetInput} onChange={e => setTargetInput(e.target.value)} className="flex-1 border border-stone-300 rounded-lg px-3 py-2 text-sm" />
           <button onClick={saveTarget} className="bg-stone-900 text-stone-100 font-medium px-4 rounded-xl text-sm">OK</button>
         </div>
+        {targetWarning && <p className="text-amber-600 text-xs mb-3">⚠ {targetWarning}</p>}
+        <div className="mb-3" />
 
         <p className="text-xs text-stone-500 uppercase tracking-wide mb-2">Clé API Gemini</p>
         <p className="text-xs text-stone-500 mb-2">Gratuite sur aistudio.google.com/apikey. Reste uniquement sur cet appareil.</p>
@@ -686,6 +725,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
             <textarea
               value={goalDescription}
               onChange={e => setGoalDescription(e.target.value)}
+              onFocus={e => setTimeout(() => e.target.scrollIntoView({ behavior: "smooth", block: "center" }), 300)}
               placeholder="Ex : J'aimerais prendre un peu de muscle mais perdre le gras que j'ai."
               rows={4}
               className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-3"
@@ -743,8 +783,18 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
           <>
             <h2 className="text-2xl font-display font-bold mb-2">Poids cible (optionnel)</h2>
             <p className="text-sm text-stone-500 mb-4">Une fois quelques pesées enregistrées, l'app estimera dans combien de temps tu l'atteindras.</p>
-            <input type="number" step="0.1" placeholder="Poids cible en kg" value={targetWeightKg} onChange={e => setTargetWeightKg(e.target.value)} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-8" />
-            <div className="flex gap-2">
+            <input type="number" step="0.1" placeholder="Poids cible en kg" value={targetWeightKg} onChange={e => setTargetWeightKg(e.target.value)} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-2" />
+            {targetWeightKg && aiResult && (() => {
+              const t = Number(targetWeightKg);
+              if (aiResult.direction === "perte" && t >= Number(weightKg)) {
+                return <p className="text-amber-600 text-xs mb-2">⚠ Ton objectif est une perte de poids, mais ce poids cible est égal ou supérieur à ton poids actuel.</p>;
+              }
+              if (aiResult.direction === "prise" && t <= Number(weightKg)) {
+                return <p className="text-amber-600 text-xs mb-2">⚠ Ton objectif est une prise de poids, mais ce poids cible est égal ou inférieur à ton poids actuel.</p>;
+              }
+              return null;
+            })()}
+            <div className="flex gap-2 mt-6">
               <button onClick={() => setStep(5)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
               <button onClick={finish} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Créer mon carnet</button>
             </div>
@@ -958,6 +1008,7 @@ function ExerciseSection({ exercises, weightKg, apiKey, onAdd, onRemove }) {
           <textarea
             value={description}
             onChange={e => setDescription(e.target.value)}
+            onFocus={e => setTimeout(() => e.target.scrollIntoView({ behavior: "smooth", block: "center" }), 300)}
             placeholder="Décris ta séance : machine, exercice, poids, séries et répétitions, durée..."
             rows={3}
             className="border border-stone-300 rounded-lg px-3 py-2 text-sm"
@@ -1175,7 +1226,15 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
 
               {mode === "describe" && (
                 <>
-                  <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Décris ce que tu as mangé..." rows={3} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-4" autoFocus />
+                  <textarea
+                    value={text}
+                    onChange={e => setText(e.target.value)}
+                    onFocus={e => setTimeout(() => e.target.scrollIntoView({ behavior: "smooth", block: "center" }), 300)}
+                    placeholder="Décris ce que tu as mangé..."
+                    rows={3}
+                    className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-4"
+                    autoFocus
+                  />
                   {error && <p className="text-rose-500 text-sm mb-3">{error}</p>}
                   <div className="flex gap-2">
                     <button onClick={closeModal} className="px-4 py-3 rounded-xl border border-stone-300">Annuler</button>
@@ -1324,6 +1383,7 @@ function App() {
           apiKey={apiKey}
           onSaveApiKey={updateApiKey}
           profile={profile}
+          weights={weights}
           onUpdateProfile={updateProfilePartial}
           onResetProfile={() => { updateProfile(null); setShowSettings(false); }}
           onClose={() => setShowSettings(false)}
