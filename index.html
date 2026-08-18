@@ -369,28 +369,61 @@ function MacroDonut({ protein, carbs, fat, targets }) {
   );
 }
 
-function SettingsModal({ apiKey, onSave, onClose }) {
-  const [value, setValue] = useState(apiKey || "");
+function SettingsModal({ apiKey, onSaveApiKey, profile, onUpdateProfile, onResetProfile, onClose }) {
+  const [keyValue, setKeyValue] = useState(apiKey || "");
+  const [keySaved, setKeySaved] = useState(false);
+  const [targetInput, setTargetInput] = useState(profile.targetWeightKg || "");
+
+  function saveTarget() {
+    onUpdateProfile({ targetWeightKg: targetInput ? Number(targetInput) : null });
+  }
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
-      <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-6">
-        <h3 className="text-xl font-semibold mb-2">Réglages</h3>
-        <p className="text-sm text-stone-500 mb-3">
-          Colle ta clé API Gemini (gratuite sur aistudio.google.com/apikey). Elle reste uniquement sur cet appareil.
-        </p>
-        <input
-          type="password"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="Clé API Gemini"
-          className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-4 font-mono text-sm"
-        />
-        <div className="flex gap-2">
-          <button onClick={onClose} className="px-4 py-3 rounded-xl border border-stone-300">Fermer</button>
-          <button onClick={() => { onSave(value.trim()); onClose(); }} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">
-            Enregistrer
-          </button>
+      <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-6 max-h-[85vh] overflow-y-auto">
+        <h3 className="text-xl font-display font-semibold mb-4">Réglages</h3>
+
+        <p className="text-xs text-stone-500 uppercase tracking-wide mb-2">Objectif</p>
+        <div className="flex flex-col gap-2 mb-5">
+          {GOALS.map(g => (
+            <button
+              key={g.value}
+              onClick={() => onUpdateProfile({ goal: g.value })}
+              className={`text-left px-3 py-2 rounded-xl border text-sm ${profile.goal === g.value ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300"}`}
+            >
+              {g.label}
+            </button>
+          ))}
         </div>
+
+        <p className="text-xs text-stone-500 uppercase tracking-wide mb-2">Poids cible</p>
+        <div className="flex gap-2 mb-5">
+          <input type="number" step="0.1" placeholder="kg" value={targetInput} onChange={e => setTargetInput(e.target.value)} className="flex-1 border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+          <button onClick={saveTarget} className="bg-stone-900 text-stone-100 font-medium px-4 rounded-xl text-sm">OK</button>
+        </div>
+
+        <p className="text-xs text-stone-500 uppercase tracking-wide mb-2">Clé API Gemini</p>
+        <p className="text-xs text-stone-500 mb-2">Gratuite sur aistudio.google.com/apikey. Reste uniquement sur cet appareil.</p>
+        <div className="flex gap-2 mb-5">
+          <input
+            type="password"
+            value={keyValue}
+            onChange={(e) => { setKeyValue(e.target.value); setKeySaved(false); }}
+            placeholder="Clé API Gemini"
+            className="flex-1 border border-stone-300 rounded-lg px-3 py-2 font-mono text-sm"
+          />
+          <button onClick={() => { onSaveApiKey(keyValue.trim()); setKeySaved(true); }} className="bg-stone-900 text-stone-100 font-medium px-4 rounded-xl text-sm">OK</button>
+        </div>
+        {keySaved && <p className="text-emerald-600 text-xs mb-5">Clé enregistrée.</p>}
+
+        <button
+          onClick={() => { if (window.confirm("Réinitialiser tout ton profil ? Il faudra tout resaisir (objectif, âge, taille, poids, activité...).")) onResetProfile(); }}
+          className="w-full text-center text-rose-500 text-sm underline mb-5"
+        >
+          Réinitialiser mon profil complet
+        </button>
+
+        <button onClick={onClose} className="w-full px-4 py-3 rounded-xl border border-stone-300">Fermer</button>
       </div>
     </div>
   );
@@ -838,7 +871,7 @@ function ExerciseSection({ exercises, weightKg, apiKey, onAdd, onRemove }) {
   );
 }
 
-function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey, onNavigateDay, onGoToday, onEditProfile, onOpenSettings, onOpenWeight, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite, waterCount, onSetWater, dayExercises, onAddExercise, onRemoveExercise }) {
+function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey, onNavigateDay, onGoToday, onOpenSettings, onOpenWeight, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite, waterCount, onSetWater, dayExercises, onAddExercise, onRemoveExercise }) {
   const [openSlot, setOpenSlot] = useState(null);
   const [mode, setMode] = useState("describe");
   const [text, setText] = useState("");
@@ -916,12 +949,10 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
   return (
     <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
       <div className="max-w-lg mx-auto">
-        <header className="flex items-center justify-between mb-1">
-          <span className="font-mono text-[10px] tracking-widest text-amber-500 uppercase bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1">{profile.goal.replace(/_/g, " ")}</span>
-          <div className="flex items-center gap-3">
-            <button onClick={() => { if (window.confirm("Modifier ton profil ? Il faudra tout resaisir (objectif, âge, poids, activité...).")) onEditProfile(); }} className="font-mono text-xs text-stone-500 underline">modifier</button>
-            <button onClick={onOpenSettings} className="text-stone-500 text-lg">⚙</button>
-          </div>
+        <header className="grid grid-cols-3 items-center mb-4">
+          <span className="font-display text-sm font-semibold text-stone-400 justify-self-start">Carnet Nutrition</span>
+          <span className="font-mono text-[10px] tracking-widest text-amber-500 uppercase bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1 justify-self-center">{profile.goal.replace(/_/g, " ")}</span>
+          <button onClick={onOpenSettings} className="text-stone-400 hover:text-stone-100 text-lg justify-self-end">⚙</button>
         </header>
 
         <div className="flex items-center justify-between mb-1">
@@ -940,6 +971,44 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
           <p className="text-center font-mono text-xs text-amber-500 mb-6">🔥 {streak} jour{streak > 1 ? "s" : ""} d'affilée dans l'objectif</p>
         )}
         {streak === 0 && <div className="mb-6" />}
+
+        <div className="flex flex-col gap-4 mb-6">
+          {SLOTS.map(slot => {
+            const slotMeals = dayMeals.filter(m => m.type === slot.type);
+            return (
+              <div key={slot.type} className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="font-semibold">{slot.label}</h2>
+                  <button onClick={() => { setOpenSlot(slot.type); setMode("describe"); setSearch(""); }} className="text-amber-600 font-mono text-sm">+ ajouter</button>
+                </div>
+                {slotMeals.length === 0 ? <p className="text-stone-500 text-sm">Rien noté</p> : (
+                  <ul className="flex flex-col">
+                    {slotMeals.map((m, i) => editingId === m.id ? (
+                      <div key={m.id} className={i > 0 ? "pt-3 mt-3 border-t border-stone-200" : ""}>
+                        <EditMealForm meal={m} onCancel={() => setEditingId(null)} onSave={(updated) => { onEditMeal(updated); setEditingId(null); }} />
+                      </div>
+                    ) : (
+                      <li key={m.id} className={`flex justify-between items-start gap-3 ${i > 0 ? "pt-3 mt-3 border-t border-stone-200" : ""}`}>
+                        {m.photo && <img src={m.photo} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0" />}
+                        <div className="flex-1">
+                          <p className="font-medium">{m.description}</p>
+                          <p className="font-mono text-xs text-stone-500">{m.calories} kcal · P{m.protein} G{m.carbs} L{m.fat}</p>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <button onClick={() => setEditingId(m.id)} className="text-stone-400 hover:text-amber-600 text-sm">✎</button>
+                          <button onClick={() => removeMealWithUndo(m)} className="text-stone-400 hover:text-rose-500 text-sm">✕</button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <WaterTracker count={waterCount} onSet={onSetWater} />
+        <ExerciseSection exercises={dayExercises} weightKg={profile.weightKg} apiKey={apiKey} onAdd={onAddExercise} onRemove={onRemoveExercise} />
 
         <button onClick={onOpenWeight} className="w-full bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 text-left mb-6">
           <div className="flex justify-between items-center mb-2">
@@ -981,41 +1050,6 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
         </div>
 
         <WeeklyTrend meals={allMeals} endDateKey={date} target={targets.calories} />
-        <WaterTracker count={waterCount} onSet={onSetWater} />
-        <ExerciseSection exercises={dayExercises} weightKg={profile.weightKg} apiKey={apiKey} onAdd={onAddExercise} onRemove={onRemoveExercise} />
-
-        <div className="flex flex-col gap-4">
-          {SLOTS.map(slot => {
-            const slotMeals = dayMeals.filter(m => m.type === slot.type);
-            return (
-              <div key={slot.type}>
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-lg font-semibold">{slot.label}</h2>
-                  <button onClick={() => { setOpenSlot(slot.type); setMode("describe"); setSearch(""); }} className="text-amber-500 font-mono text-sm">+ ajouter</button>
-                </div>
-                {slotMeals.length === 0 ? <p className="text-stone-600 text-sm">Rien noté</p> : (
-                  <ul className="flex flex-col gap-2">
-                    {slotMeals.map(m => editingId === m.id ? (
-                      <EditMealForm key={m.id} meal={m} onCancel={() => setEditingId(null)} onSave={(updated) => { onEditMeal(updated); setEditingId(null); }} />
-                    ) : (
-                      <li key={m.id} className="bg-stone-100 text-stone-900 rounded-2xl shadow-md shadow-black/20 px-4 py-3 flex justify-between items-start gap-3">
-                        {m.photo && <img src={m.photo} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0" />}
-                        <div className="flex-1">
-                          <p className="font-medium">{m.description}</p>
-                          <p className="font-mono text-xs text-stone-500">{m.calories} kcal · P{m.protein} G{m.carbs} L{m.fat}</p>
-                        </div>
-                        <div className="flex gap-2 shrink-0">
-                          <button onClick={() => setEditingId(m.id)} className="text-stone-400 hover:text-amber-600 text-sm">✎</button>
-                          <button onClick={() => removeMealWithUndo(m)} className="text-stone-400 hover:text-rose-500 text-sm">✕</button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            );
-          })}
-        </div>
 
         {openSlot && (
           <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center z-50 p-4" style={{ paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}>
@@ -1156,6 +1190,13 @@ function App() {
   }, [profile]);
 
   function updateProfile(p) { setProfile(p); save("nutri_profile", p); }
+  function updateProfilePartial(patch) {
+    const merged = { ...profile, ...patch };
+    if (patch.goal) {
+      merged.targets = computeTargets({ sex: merged.sex, age: merged.age, heightCm: merged.heightCm, weightKg: merged.weightKg, activity: merged.activity, goal: merged.goal });
+    }
+    updateProfile(merged);
+  }
   function updateMeals(m) { setMeals(m); save("nutri_meals", m); }
   function updateWeights(w) { setWeights(w); save("nutri_weights", w); }
   function updateFavorites(f) { setFavorites(f); save("nutri_favorites", f); }
@@ -1177,7 +1218,16 @@ function App() {
 
   return (
     <>
-      {showSettings && <SettingsModal apiKey={apiKey} onSave={updateApiKey} onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsModal
+          apiKey={apiKey}
+          onSaveApiKey={updateApiKey}
+          profile={profile}
+          onUpdateProfile={updateProfilePartial}
+          onResetProfile={() => { updateProfile(null); setShowSettings(false); }}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
       {showWeigh && (
         <WeighModal
           onSkip={() => setShowWeigh(false)}
@@ -1204,7 +1254,6 @@ function App() {
           apiKey={apiKey}
           onNavigateDay={(delta) => setSelectedDate(toKey(addDays(new Date(selectedDate + "T00:00:00"), delta)))}
           onGoToday={() => setSelectedDate(todayKey())}
-          onEditProfile={() => updateProfile(null)}
           onOpenSettings={() => setShowSettings(true)}
           onOpenWeight={() => setView("weight")}
           onAddMeal={(meal) => updateMeals({ ...meals, [selectedDate]: [...(meals[selectedDate] || []), meal] })}
