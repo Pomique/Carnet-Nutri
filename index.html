@@ -70,25 +70,17 @@ const SLOTS = [
   { type: "grignotage", label: "Grignotage" },
 ];
 const WEEKDAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
-const GOAL_WEEKLY_RATE = { prise_de_muscle: 0.0035, perte_de_poids: -0.007, maintien: 0 }; // % du poids de corps / semaine
-
-function computeTargets({ sex, age, heightCm, weightKg, activity, goal }) {
+/** Filet de secours si l'IA n'est pas disponible : calcul neutre au maintien (à recalculer ensuite avec la clé Gemini) */
+function fallbackTargets({ sex, age, heightCm, weightKg, activity }) {
   const bmr = sex === "homme"
     ? 10 * weightKg + 6.25 * heightCm - 5 * age + 5
     : 10 * weightKg + 6.25 * heightCm - 5 * age - 161;
   const factor = ACTIVITY.find(a => a[0] === activity)?.[2] || 1.375;
-  const tdee = bmr * factor;
-
-  // Rythme hebdomadaire sûr, proportionnel au poids (plutôt qu'un % arbitraire du TDEE)
-  const weeklyRateKg = weightKg * GOAL_WEEKLY_RATE[goal];
-  const dailyCalorieDelta = (weeklyRateKg * 7700) / 7; // ~7700 kcal par kg de masse corporelle
-  const calories = Math.round(tdee + dailyCalorieDelta);
-
-  const proteinPerKg = goal === "prise_de_muscle" ? 2.0 : goal === "perte_de_poids" ? 1.8 : 1.6;
-  const protein = Math.round(weightKg * proteinPerKg);
+  const calories = Math.round(bmr * factor);
+  const protein = Math.round(weightKg * 1.6);
   const fat = Math.round((calories * 0.28) / 9);
   const carbs = Math.max(0, Math.round((calories - protein * 4 - fat * 9) / 4));
-  return { calories, protein, carbs, fat, weeklyRateKg };
+  return { calories, protein, carbs, fat };
 }
 
 function pad(n) { return String(n).padStart(2, "0"); }
@@ -114,7 +106,7 @@ function previousWeightEntry(weights, beforeKey) {
 }
 
 /** Compare la pesée de la semaine à l'évolution attendue selon l'objectif, et propose un ajustement de calories */
-function suggestAdjustment(goal, prevEntry, currentKey, currentKg, currentTargets) {
+function suggestAdjustment(direction, prevEntry, currentKey, currentKg, currentTargets) {
   if (!prevEntry) return null;
   const [prevKey, prevKg] = prevEntry;
   const days = daysBetween(currentKey, prevKey);
@@ -124,10 +116,10 @@ function suggestAdjustment(goal, prevEntry, currentKey, currentKg, currentTarget
 
   let delta = 0;
   let reason = "";
-  if (goal === "perte_de_poids") {
+  if (direction === "perte") {
     if (weeklyPct > -0.3) { delta = -150; reason = "Ton poids baisse trop lentement par rapport à l'objectif."; }
     else if (weeklyPct < -1.2) { delta = 150; reason = "Ton poids baisse plus vite que recommandé."; }
-  } else if (goal === "prise_de_muscle") {
+  } else if (direction === "prise") {
     if (weeklyPct < 0.15) { delta = 150; reason = "Ta prise de poids est trop lente pour progresser."; }
     else if (weeklyPct > 0.7) { delta = -100; reason = "Tu prends du poids plus vite que ce qui favorise le muscle (risque de prise de gras)."; }
   } else {
@@ -268,6 +260,53 @@ async function analyzeMeal({ description, imageBase64, imageMediaType, apiKey })
   };
 }
 
+async function analyzeGoal({ sex, age, heightCm, weightKg, activity, description, apiKey }) {
+  const key = (apiKey || "").trim();
+  if (!key) throw new Error("Ajoute d'abord ta clé Gemini.");
+  const activityLabel = ACTIVITY.find(a => a[0] === activity)?.[1] || activity;
+  const prompt = `Tu es un coach en nutrition sportive expert. Voici une personne :
+- Sexe : ${sex}
+- Âge : ${age} ans
+- Taille : ${heightCm} cm
+- Poids actuel : ${weightKg} kg
+- Niveau d'activité : ${activityLabel}
+- Objectif exprimé avec ses propres mots : "${description}"
+
+Calcule ses besoins quotidiens (calories, protéines, glucides, lipides) adaptés précisément à cet objectif, en te basant sur les principes de nutrition sportive (déficit ou surplus raisonnable et sûr, apport protéique adapté à l'objectif, y compris pour des objectifs nuancés comme une recomposition corporelle). Donne aussi une étiquette courte (2-4 mots) résumant l'objectif, et la tendance de poids générale à attendre.
+
+Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact :
+{"label": "étiquette courte", "direction": "perte" | "prise" | "maintien", "calories": nombre, "protein": nombre_grammes, "carbs": nombre_grammes, "fat": nombre_grammes}`;
+
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.3 },
+    }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const errJson = await res.json();
+      detail = errJson?.error?.message || "";
+    } catch {}
+    throw new Error(`Erreur Gemini (${res.status})${detail ? " : " + detail : ""}`);
+  }
+  const data = await res.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const cleaned = rawText.replace(/```json|```/g, "").trim();
+  const parsed = JSON.parse(cleaned);
+  return {
+    label: parsed.label || "Objectif personnalisé",
+    direction: ["perte", "prise", "maintien"].includes(parsed.direction) ? parsed.direction : "maintien",
+    calories: Math.round(parsed.calories) || 2000,
+    protein: Math.round(parsed.protein) || 100,
+    carbs: Math.round(parsed.carbs) || 200,
+    fat: Math.round(parsed.fat) || 60,
+  };
+}
+
 async function analyzeExercise({ description, weightKg, apiKey }) {
   const key = (apiKey || "").trim();
   if (!key) throw new Error("Ajoute d'abord ta clé Gemini dans les réglages (icône ⚙).");
@@ -373,9 +412,34 @@ function SettingsModal({ apiKey, onSaveApiKey, profile, onUpdateProfile, onReset
   const [keyValue, setKeyValue] = useState(apiKey || "");
   const [keySaved, setKeySaved] = useState(false);
   const [targetInput, setTargetInput] = useState(profile.targetWeightKg || "");
+  const [goalDescInput, setGoalDescInput] = useState(profile.goalDescription || "");
+  const [recalculating, setRecalculating] = useState(false);
+  const [recalcError, setRecalcError] = useState("");
 
   function saveTarget() {
     onUpdateProfile({ targetWeightKg: targetInput ? Number(targetInput) : null });
+  }
+
+  async function recalculate() {
+    if (!goalDescInput.trim()) return;
+    setRecalculating(true);
+    setRecalcError("");
+    try {
+      const result = await analyzeGoal({
+        sex: profile.sex, age: profile.age, heightCm: profile.heightCm, weightKg: profile.weightKg,
+        activity: profile.activity, description: goalDescInput, apiKey: keyValue,
+      });
+      onUpdateProfile({
+        goal: result.label,
+        goalDescription: goalDescInput,
+        goalDirection: result.direction,
+        targets: { calories: result.calories, protein: result.protein, carbs: result.carbs, fat: result.fat },
+      });
+    } catch (e) {
+      setRecalcError(e.message || "Erreur inconnue");
+    } finally {
+      setRecalculating(false);
+    }
   }
 
   return (
@@ -383,18 +447,19 @@ function SettingsModal({ apiKey, onSaveApiKey, profile, onUpdateProfile, onReset
       <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-6 max-h-[85vh] overflow-y-auto">
         <h3 className="text-xl font-display font-semibold mb-4">Réglages</h3>
 
-        <p className="text-xs text-stone-500 uppercase tracking-wide mb-2">Objectif</p>
-        <div className="flex flex-col gap-2 mb-5">
-          {GOALS.map(g => (
-            <button
-              key={g.value}
-              onClick={() => onUpdateProfile({ goal: g.value })}
-              className={`text-left px-3 py-2 rounded-xl border text-sm ${profile.goal === g.value ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300"}`}
-            >
-              {g.label}
-            </button>
-          ))}
-        </div>
+        <p className="text-xs text-stone-500 uppercase tracking-wide mb-1">Objectif actuel</p>
+        <p className="font-medium mb-3">{profile.goal}</p>
+        <textarea
+          value={goalDescInput}
+          onChange={e => setGoalDescInput(e.target.value)}
+          placeholder="Décris ce que tu veux faire..."
+          rows={3}
+          className="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm mb-2"
+        />
+        {recalcError && <p className="text-rose-500 text-xs mb-2">{recalcError}</p>}
+        <button onClick={recalculate} disabled={recalculating || !goalDescInput.trim()} className="w-full bg-stone-900 text-stone-100 font-medium py-2 rounded-xl text-sm mb-5 disabled:opacity-40">
+          {recalculating ? "Recalcul en cours..." : "Recalculer avec l'IA"}
+        </button>
 
         <p className="text-xs text-stone-500 uppercase tracking-wide mb-2">Poids cible</p>
         <div className="flex gap-2 mb-5">
@@ -509,39 +574,62 @@ function WeightChart({ weights }) {
 function Onboarding({ onDone, apiKey, onSaveApiKey }) {
   const [step, setStep] = useState(0);
   const [apiKeyInput, setApiKeyInput] = useState(apiKey || "");
-  const [goal, setGoal] = useState(null);
   const [sex, setSex] = useState("homme");
   const [age, setAge] = useState("");
   const [heightCm, setHeightCm] = useState("");
   const [weightKg, setWeightKg] = useState("");
   const [activity, setActivity] = useState("modere");
+  const [goalDescription, setGoalDescription] = useState("");
+  const [aiResult, setAiResult] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState("");
   const [weighDay, setWeighDay] = useState(0);
   const [targetWeightKg, setTargetWeightKg] = useState("");
 
-  const canEstimate = goal && age && heightCm && weightKg;
-  const provisionalTargets = canEstimate
-    ? computeTargets({ sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, goal })
-    : null;
-  const weeksEstimate = provisionalTargets && targetWeightKg && provisionalTargets.weeklyRateKg !== 0
-    ? Math.round(Math.abs((Number(targetWeightKg) - Number(weightKg)) / provisionalTargets.weeklyRateKg))
-    : null;
+  async function runAnalysis() {
+    if (!goalDescription.trim()) return;
+    setAnalyzing(true);
+    setAnalyzeError("");
+    try {
+      const result = await analyzeGoal({
+        sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity,
+        description: goalDescription, apiKey: apiKeyInput,
+      });
+      setAiResult(result);
+      setStep(4);
+    } catch (e) {
+      setAnalyzeError(e.message || "Erreur inconnue");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  function useFallback() {
+    const targets = fallbackTargets({ sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity });
+    setAiResult({ label: "Objectif personnalisé (à recalculer)", direction: "maintien", ...targets });
+    setStep(4);
+  }
 
   function finish() {
     onSaveApiKey(apiKeyInput.trim());
-    const targets = computeTargets({ sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, goal });
-    onDone({ goal, sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity, targets, weighDay, targetWeightKg: targetWeightKg ? Number(targetWeightKg) : null });
+    onDone({
+      sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity,
+      goal: aiResult.label, goalDescription, goalDirection: aiResult.direction,
+      targets: { calories: aiResult.calories, protein: aiResult.protein, carbs: aiResult.carbs, fat: aiResult.fat },
+      weighDay, targetWeightKg: targetWeightKg ? Number(targetWeightKg) : null,
+    });
   }
 
   return (
     <div className="min-h-screen bg-stone-950 flex items-center justify-center px-6">
       <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-8">
-        <p className="font-mono text-xs tracking-widest text-amber-600 uppercase mb-1">Étape {step + 1} / 6</p>
+        <p className="font-mono text-xs tracking-widest text-amber-600 uppercase mb-1">Étape {Math.min(step, 6) + 1} / 7</p>
 
         {step === 0 && (
           <>
             <h2 className="text-2xl font-display font-bold mb-2">Ta clé API Gemini</h2>
             <p className="text-sm text-stone-500 mb-6">
-              Nécessaire pour analyser tes repas (texte ou photo). Gratuite sur{" "}
+              C'est elle qui va analyser tes repas et calculer tes besoins. Gratuite sur{" "}
               <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" className="text-amber-600 underline">aistudio.google.com/apikey</a>.
               Elle reste stockée uniquement sur cet appareil.
             </p>
@@ -552,33 +640,11 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
               placeholder="Clé API Gemini"
               className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-8 font-mono text-sm"
             />
-            <div className="flex gap-2">
-              <button onClick={() => setStep(1)} className="px-4 py-3 rounded-xl border border-stone-300 text-sm text-stone-500">Passer pour l'instant</button>
-              <button onClick={() => setStep(1)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
-            </div>
+            <button onClick={() => setStep(1)} className="w-full bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
           </>
         )}
 
         {step === 1 && (
-          <>
-            <h2 className="text-2xl font-display font-bold mb-6">Quel est ton objectif ?</h2>
-            <div className="flex flex-col gap-3">
-              {GOALS.map(g => (
-                <button key={g.value} onClick={() => setGoal(g.value)}
-                  className={`text-left px-4 py-3 rounded-xl border ${goal === g.value ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300 hover:border-stone-500"}`}>
-                  <div className="font-medium">{g.label}</div>
-                  <div className="text-sm opacity-60">{g.hint}</div>
-                </button>
-              ))}
-            </div>
-            <div className="flex gap-2 mt-8">
-              <button onClick={() => setStep(0)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
-              <button disabled={!goal} onClick={() => setStep(2)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
-            </div>
-          </>
-        )}
-
-        {step === 2 && (
           <>
             <h2 className="text-2xl font-display font-bold mb-6">Un peu plus sur toi</h2>
             <div className="flex gap-2 mb-4">
@@ -592,13 +658,13 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
               <input type="number" placeholder="Poids kg" value={weightKg} onChange={e => setWeightKg(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2" />
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(1)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
-              <button disabled={!age || !heightCm || !weightKg} onClick={() => setStep(3)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
+              <button onClick={() => setStep(0)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button disabled={!age || !heightCm || !weightKg} onClick={() => setStep(2)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-30">Continuer</button>
             </div>
           </>
         )}
 
-        {step === 3 && (
+        {step === 2 && (
           <>
             <h2 className="text-2xl font-display font-bold mb-6">Ton niveau d'activité</h2>
             <div className="flex flex-col gap-3 mb-8">
@@ -607,13 +673,57 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
               ))}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(2)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
-              <button onClick={() => setStep(4)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
+              <button onClick={() => setStep(1)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={() => setStep(3)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
             </div>
           </>
         )}
 
-        {step === 4 && (
+        {step === 3 && (
+          <>
+            <h2 className="text-2xl font-display font-bold mb-2">Ton objectif</h2>
+            <p className="text-sm text-stone-500 mb-4">Décris ce que tu veux faire, avec tes mots. L'IA calcule tes besoins précis à partir de ça.</p>
+            <textarea
+              value={goalDescription}
+              onChange={e => setGoalDescription(e.target.value)}
+              placeholder="Ex : J'aimerais prendre un peu de muscle mais perdre le gras que j'ai."
+              rows={4}
+              className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-3"
+              autoFocus
+            />
+            {analyzeError && (
+              <div className="mb-3">
+                <p className="text-rose-500 text-sm mb-2">{analyzeError}</p>
+                <button onClick={useFallback} className="text-stone-500 text-xs underline">Continuer sans l'IA pour l'instant</button>
+              </div>
+            )}
+            <div className="flex gap-2 mt-2">
+              <button onClick={() => setStep(2)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={runAnalysis} disabled={analyzing || !goalDescription.trim()} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl disabled:opacity-40">
+                {analyzing ? "Calcul en cours..." : "Calculer mes besoins"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 4 && aiResult && (
+          <>
+            <h2 className="text-2xl font-display font-bold mb-2">{aiResult.label}</h2>
+            <p className="text-sm text-stone-500 mb-4">Voici tes besoins quotidiens calculés :</p>
+            <div className="bg-stone-200/60 rounded-xl p-4 mb-6 font-mono text-sm flex flex-col gap-1">
+              <div className="flex justify-between"><span>Calories</span><span className="font-semibold">{aiResult.calories} kcal</span></div>
+              <div className="flex justify-between"><span>Protéines</span><span className="font-semibold">{aiResult.protein} g</span></div>
+              <div className="flex justify-between"><span>Glucides</span><span className="font-semibold">{aiResult.carbs} g</span></div>
+              <div className="flex justify-between"><span>Lipides</span><span className="font-semibold">{aiResult.fat} g</span></div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setStep(3)} className="px-4 py-3 rounded-xl border border-stone-300">Revoir</button>
+              <button onClick={() => setStep(5)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
+            </div>
+          </>
+        )}
+
+        {step === 5 && (
           <>
             <h2 className="text-2xl font-display font-bold mb-2">Ton jour de pesée</h2>
             <p className="text-sm text-stone-500 mb-6">Chaque semaine, ce jour-là, l'app te demandera ton poids.</p>
@@ -623,24 +733,19 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
               ))}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(3)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
-              <button onClick={() => setStep(5)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
+              <button onClick={() => setStep(4)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+              <button onClick={() => setStep(6)} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Continuer</button>
             </div>
           </>
         )}
 
-        {step === 5 && (
+        {step === 6 && (
           <>
             <h2 className="text-2xl font-display font-bold mb-2">Poids cible (optionnel)</h2>
-            <p className="text-sm text-stone-500 mb-4">Ça permet d'estimer combien de temps ça prendra, selon un rythme sûr par rapport à ton poids actuel.</p>
-            <input type="number" step="0.1" placeholder="Poids cible en kg" value={targetWeightKg} onChange={e => setTargetWeightKg(e.target.value)} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-3" />
-            {weeksEstimate !== null && (
-              <p className="text-sm text-amber-600 mb-4">
-                À {provisionalTargets.calories} kcal/j, ça devrait prendre environ <span className="font-semibold">{weeksEstimate} semaine{weeksEstimate > 1 ? "s" : ""}</span>.
-              </p>
-            )}
-            <div className="flex gap-2 mt-4">
-              <button onClick={() => setStep(4)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
+            <p className="text-sm text-stone-500 mb-4">Une fois quelques pesées enregistrées, l'app estimera dans combien de temps tu l'atteindras.</p>
+            <input type="number" step="0.1" placeholder="Poids cible en kg" value={targetWeightKg} onChange={e => setTargetWeightKg(e.target.value)} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-8" />
+            <div className="flex gap-2">
+              <button onClick={() => setStep(5)} className="px-4 py-3 rounded-xl border border-stone-300">Retour</button>
               <button onClick={finish} className="flex-1 bg-amber-500 text-stone-900 font-medium py-3 rounded-xl">Créer mon carnet</button>
             </div>
           </>
@@ -951,7 +1056,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
       <div className="max-w-lg mx-auto">
         <header className="grid grid-cols-3 items-center mb-4">
           <span className="font-display text-sm font-semibold text-stone-400 justify-self-start">Carnet Nutrition</span>
-          <span className="font-mono text-[10px] tracking-widest text-amber-500 uppercase bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1 justify-self-center">{profile.goal.replace(/_/g, " ")}</span>
+          <span className="font-mono text-[10px] tracking-widest text-amber-500 uppercase bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1 justify-self-center text-center">{profile.goal}</span>
           <button onClick={onOpenSettings} className="text-stone-400 hover:text-stone-100 text-lg justify-self-end">⚙</button>
         </header>
 
@@ -971,6 +1076,26 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
           <p className="text-center font-mono text-xs text-amber-500 mb-6">🔥 {streak} jour{streak > 1 ? "s" : ""} d'affilée dans l'objectif</p>
         )}
         {streak === 0 && <div className="mb-6" />}
+
+        <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">←</button>
+            <span className="font-mono text-xs text-stone-400 uppercase tracking-wide">{macroView === "gauges" ? "Jauges" : "Répartition"}</span>
+            <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">→</button>
+          </div>
+          <div className="min-h-[210px] flex flex-col justify-center">
+            {macroView === "gauges" ? (
+              <div className="flex flex-col gap-3">
+                <Gauge label={exerciseCalories > 0 ? `Calories (+${exerciseCalories} sport)` : "Calories"} value={totals.calories} target={effectiveCalorieTarget} unit="kcal" colorClass="bg-amber-500" />
+                <Gauge label="Protéines" value={totals.protein} target={targets.protein} unit="g" colorClass="bg-emerald-500" />
+                <Gauge label="Glucides" value={totals.carbs} target={targets.carbs} unit="g" colorClass="bg-rose-500" />
+                <Gauge label="Lipides" value={totals.fat} target={targets.fat} unit="g" colorClass="bg-sky-500" />
+              </div>
+            ) : (
+              <MacroDonut protein={totals.protein} carbs={totals.carbs} fat={totals.fat} targets={targets} />
+            )}
+          </div>
+        </div>
 
         <div className="flex flex-col gap-4 mb-6">
           {SLOTS.map(slot => {
@@ -1028,26 +1153,6 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
             return null;
           })()}
         </button>
-
-        <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">←</button>
-            <span className="font-mono text-xs text-stone-400 uppercase tracking-wide">{macroView === "gauges" ? "Jauges" : "Répartition"}</span>
-            <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">→</button>
-          </div>
-          <div className="min-h-[210px] flex flex-col justify-center">
-            {macroView === "gauges" ? (
-              <div className="flex flex-col gap-3">
-                <Gauge label={exerciseCalories > 0 ? `Calories (+${exerciseCalories} sport)` : "Calories"} value={totals.calories} target={effectiveCalorieTarget} unit="kcal" colorClass="bg-amber-500" />
-                <Gauge label="Protéines" value={totals.protein} target={targets.protein} unit="g" colorClass="bg-emerald-500" />
-                <Gauge label="Glucides" value={totals.carbs} target={targets.carbs} unit="g" colorClass="bg-rose-500" />
-                <Gauge label="Lipides" value={totals.fat} target={targets.fat} unit="g" colorClass="bg-sky-500" />
-              </div>
-            ) : (
-              <MacroDonut protein={totals.protein} carbs={totals.carbs} fat={totals.fat} targets={targets} />
-            )}
-          </div>
-        </div>
 
         <WeeklyTrend meals={allMeals} endDateKey={date} target={targets.calories} />
 
@@ -1191,11 +1296,7 @@ function App() {
 
   function updateProfile(p) { setProfile(p); save("nutri_profile", p); }
   function updateProfilePartial(patch) {
-    const merged = { ...profile, ...patch };
-    if (patch.goal) {
-      merged.targets = computeTargets({ sex: merged.sex, age: merged.age, heightCm: merged.heightCm, weightKg: merged.weightKg, activity: merged.activity, goal: merged.goal });
-    }
-    updateProfile(merged);
+    updateProfile({ ...profile, ...patch });
   }
   function updateMeals(m) { setMeals(m); save("nutri_meals", m); }
   function updateWeights(w) { setWeights(w); save("nutri_weights", w); }
@@ -1210,7 +1311,7 @@ function App() {
     const nextWeights = { ...weights, [key]: kg };
     updateWeights(nextWeights);
     setShowWeigh(false);
-    const suggestion = suggestAdjustment(profile.goal, prevEntry, key, kg, profile.targets);
+    const suggestion = suggestAdjustment(profile.goalDirection, prevEntry, key, kg, profile.targets);
     if (suggestion) setAdjustment(suggestion);
   }
 
