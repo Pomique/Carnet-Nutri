@@ -6,12 +6,24 @@
 <title>Le Carnet — suivi nutrition</title>
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#0c0a09" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700;9..144,900&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>
+  tailwind = { config: { theme: { extend: { fontFamily: {
+    display: ["Fraunces", "serif"],
+    sans: ["Inter", "sans-serif"],
+    mono: ["IBM Plex Mono", "monospace"],
+  } } } } };
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
 <style>
-  body { background:#0c0a09; }
+  body { background:#0c0a09; font-family: "Inter", sans-serif; }
+  .font-display { font-family: "Fraunces", serif; letter-spacing: -0.01em; }
+  .font-mono { font-family: "IBM Plex Mono", monospace; }
   #fallback { color:#a8a29e; font-family:monospace; font-size:13px; padding:24px; line-height:1.6; }
   #fallback a { color:#d97706; }
 </style>
@@ -256,6 +268,37 @@ async function analyzeMeal({ description, imageBase64, imageMediaType, apiKey })
   };
 }
 
+async function analyzeExercise({ description, weightKg, apiKey }) {
+  const key = (apiKey || "").trim();
+  if (!key) throw new Error("Ajoute d'abord ta clé Gemini dans les réglages (icône ⚙).");
+  const prompt = `Tu es un coach sportif expert. On te décrit une séance de sport (type d'activité, machine ou exercice utilisé, poids soulevé, nombre de séries et répétitions, durée...). La personne pèse environ ${weightKg || 70} kg. Estime les calories brûlées pendant CETTE séance uniquement. Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact : {"label": "nom court de la séance", "calories": nombre}. Donne ta meilleure estimation réaliste même si l'information est incomplète.`;
+
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }, { text: `Séance : ${description}` }] }],
+      generationConfig: { temperature: 0.2 },
+    }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const errJson = await res.json();
+      detail = errJson?.error?.message || "";
+    } catch {}
+    throw new Error(`Erreur Gemini (${res.status})${detail ? " : " + detail : ""}`);
+  }
+  const data = await res.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const cleaned = rawText.replace(/```json|```/g, "").trim();
+  const parsed = JSON.parse(cleaned);
+  return {
+    label: parsed.label || "Séance de sport",
+    calories: Math.round(parsed.calories) || 0,
+  };
+}
+
 function Gauge({ label, value, target, unit, colorClass }) {
   const pct = target > 0 ? Math.min((value / target) * 100, 100) : 0;
   return (
@@ -330,7 +373,7 @@ function SettingsModal({ apiKey, onSave, onClose }) {
   const [value, setValue] = useState(apiKey || "");
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
-      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6">
+      <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-6">
         <h3 className="text-xl font-semibold mb-2">Réglages</h3>
         <p className="text-sm text-stone-500 mb-3">
           Colle ta clé API Gemini (gratuite sur aistudio.google.com/apikey). Elle reste uniquement sur cet appareil.
@@ -357,7 +400,7 @@ function WeighModal({ onSave, onSkip }) {
   const [value, setValue] = useState("");
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
-      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6">
+      <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-6">
         <h3 className="text-xl font-semibold mb-2">Pesée du jour</h3>
         <p className="text-sm text-stone-500 mb-4">C'est ton jour de pesée hebdomadaire. Note ton poids :</p>
         <input
@@ -385,7 +428,7 @@ function WeighModal({ onSave, onSkip }) {
 function AdjustmentModal({ suggestion, onAccept, onIgnore }) {
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
-      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6">
+      <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-6">
         <h3 className="text-xl font-semibold mb-2">Ajustement suggéré</h3>
         <p className="text-sm text-stone-600 mb-4">{suggestion.reason}</p>
         <p className="font-mono text-sm mb-6">
@@ -458,12 +501,12 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
 
   return (
     <div className="min-h-screen bg-stone-950 flex items-center justify-center px-6">
-      <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-8">
+      <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-8">
         <p className="font-mono text-xs tracking-widest text-amber-600 uppercase mb-1">Étape {step + 1} / 6</p>
 
         {step === 0 && (
           <>
-            <h2 className="text-2xl font-bold mb-2">Ta clé API Gemini</h2>
+            <h2 className="text-2xl font-display font-bold mb-2">Ta clé API Gemini</h2>
             <p className="text-sm text-stone-500 mb-6">
               Nécessaire pour analyser tes repas (texte ou photo). Gratuite sur{" "}
               <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" className="text-amber-600 underline">aistudio.google.com/apikey</a>.
@@ -485,7 +528,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
 
         {step === 1 && (
           <>
-            <h2 className="text-2xl font-bold mb-6">Quel est ton objectif ?</h2>
+            <h2 className="text-2xl font-display font-bold mb-6">Quel est ton objectif ?</h2>
             <div className="flex flex-col gap-3">
               {GOALS.map(g => (
                 <button key={g.value} onClick={() => setGoal(g.value)}
@@ -504,7 +547,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
 
         {step === 2 && (
           <>
-            <h2 className="text-2xl font-bold mb-6">Un peu plus sur toi</h2>
+            <h2 className="text-2xl font-display font-bold mb-6">Un peu plus sur toi</h2>
             <div className="flex gap-2 mb-4">
               {["homme", "femme"].map(s => (
                 <button key={s} onClick={() => setSex(s)} className={`flex-1 py-2 rounded-lg border capitalize ${sex === s ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300"}`}>{s}</button>
@@ -524,7 +567,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
 
         {step === 3 && (
           <>
-            <h2 className="text-2xl font-bold mb-6">Ton niveau d'activité</h2>
+            <h2 className="text-2xl font-display font-bold mb-6">Ton niveau d'activité</h2>
             <div className="flex flex-col gap-3 mb-8">
               {ACTIVITY.map(([value, label]) => (
                 <button key={value} onClick={() => setActivity(value)} className={`text-left px-4 py-3 rounded-xl border ${activity === value ? "border-stone-900 bg-stone-900 text-stone-100" : "border-stone-300"}`}>{label}</button>
@@ -539,7 +582,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
 
         {step === 4 && (
           <>
-            <h2 className="text-2xl font-bold mb-2">Ton jour de pesée</h2>
+            <h2 className="text-2xl font-display font-bold mb-2">Ton jour de pesée</h2>
             <p className="text-sm text-stone-500 mb-6">Chaque semaine, ce jour-là, l'app te demandera ton poids.</p>
             <div className="grid grid-cols-2 gap-2 mb-8">
               {WEEKDAYS.map((d, i) => (
@@ -555,7 +598,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
 
         {step === 5 && (
           <>
-            <h2 className="text-2xl font-bold mb-2">Poids cible (optionnel)</h2>
+            <h2 className="text-2xl font-display font-bold mb-2">Poids cible (optionnel)</h2>
             <p className="text-sm text-stone-500 mb-4">Ça permet d'estimer combien de temps ça prendra, selon un rythme sûr par rapport à ton poids actuel.</p>
             <input type="number" step="0.1" placeholder="Poids cible en kg" value={targetWeightKg} onChange={e => setTargetWeightKg(e.target.value)} className="w-full border border-stone-300 rounded-lg px-3 py-2 mb-3" />
             {weeksEstimate !== null && (
@@ -591,13 +634,13 @@ function WeightPage({ weights, targetWeightKg, onBack, onAdd, onUpdateTarget }) 
     <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
       <div className="max-w-lg mx-auto">
         <button onClick={onBack} className="text-stone-500 text-sm mb-2">← Retour</button>
-        <h1 className="text-3xl font-black mb-6">Suivi du poids</h1>
+        <h1 className="text-3xl font-display font-black mb-6">Suivi du poids</h1>
 
-        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+        <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
           <WeightChart weights={weights} />
         </div>
 
-        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+        <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
           <div className="flex items-center justify-between mb-2">
             <h2 className="font-semibold">{targetWeightKg ? `Objectif : ${targetWeightKg} kg` : "Pas encore de poids cible"}</h2>
             <button onClick={() => { setTargetInput(targetWeightKg || ""); setEditingTarget(v => !v); }} className="text-amber-600 font-mono text-xs">
@@ -625,7 +668,7 @@ function WeightPage({ weights, targetWeightKg, onBack, onAdd, onUpdateTarget }) 
           )}
         </div>
 
-        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+        <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
           <h2 className="font-semibold mb-3">Ajouter une pesée</h2>
           <div className="flex gap-2">
             <input type="date" value={date} onChange={e => setDate(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
@@ -636,7 +679,7 @@ function WeightPage({ weights, targetWeightKg, onBack, onAdd, onUpdateTarget }) 
 
         <ul className="flex flex-col gap-2">
           {entries.map(([d, v]) => (
-            <li key={d} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between">
+            <li key={d} className="bg-stone-100 text-stone-900 rounded-2xl shadow-md shadow-black/20 px-4 py-3 flex justify-between">
               <span className="font-mono text-sm">{new Date(d + "T00:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" })}</span>
               <span className="font-mono text-sm font-medium">{v} kg</span>
             </li>
@@ -653,7 +696,7 @@ function EditMealForm({ meal, onSave, onCancel }) {
   const [carbs, setCarbs] = useState(meal.carbs);
   const [fat, setFat] = useState(meal.fat);
   return (
-    <div className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3">
+    <div className="bg-stone-100 text-stone-900 rounded-2xl shadow-md shadow-black/20 px-4 py-3">
       <p className="font-medium mb-2">{meal.description}</p>
       <div className="grid grid-cols-4 gap-2 mb-2">
         <div><label className="text-xs text-stone-500">kcal</label><input type="number" value={calories} onChange={e => setCalories(Number(e.target.value))} className="w-full border border-stone-300 rounded px-2 py-1 text-sm" /></div>
@@ -688,7 +731,7 @@ function WeeklyTrend({ meals, endDateKey, target }) {
   const days = computeWeeklyTrend(meals, endDateKey);
   const max = Math.max(target, ...days.map(d => d.total)) || 1;
   return (
-    <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+    <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
       <h2 className="font-semibold mb-4">Tendance 7 jours</h2>
       <div className="flex items-end justify-between gap-2 h-28">
         {days.map((d, i) => {
@@ -712,7 +755,7 @@ function WeeklyTrend({ meals, endDateKey, target }) {
 function WaterTracker({ count, onSet }) {
   const target = 8;
   return (
-    <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+    <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-semibold">Eau</h2>
         <span className="font-mono text-xs text-stone-500">{count} / {target} verres</span>
@@ -730,15 +773,25 @@ function WaterTracker({ count, onSet }) {
   );
 }
 
-function ExerciseSection({ exercises, onAdd, onRemove }) {
+function ExerciseSection({ exercises, weightKg, apiKey, onAdd, onRemove }) {
   const [open, setOpen] = useState(false);
   const [description, setDescription] = useState("");
-  const [calories, setCalories] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  function add() {
-    if (!calories) return;
-    onAdd({ id: `${Date.now()}`, description: description || "Séance de sport", calories: Number(calories) });
-    setDescription(""); setCalories(""); setOpen(false);
+  async function add() {
+    if (!description.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await analyzeExercise({ description, weightKg, apiKey });
+      onAdd({ id: `${Date.now()}`, description: result.label, calories: result.calories });
+      setDescription(""); setOpen(false);
+    } catch (e) {
+      setError(e.message || "Erreur inconnue");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -752,7 +805,7 @@ function ExerciseSection({ exercises, onAdd, onRemove }) {
       ) : (
         <ul className="flex flex-col gap-2 mb-2">
           {exercises.map(ex => (
-            <li key={ex.id} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between items-center">
+            <li key={ex.id} className="bg-stone-100 text-stone-900 rounded-2xl shadow-md shadow-black/20 px-4 py-3 flex justify-between items-center">
               <span className="font-medium">{ex.description}</span>
               <div className="flex items-center gap-3">
                 <span className="font-mono text-xs text-emerald-600">+{ex.calories} kcal</span>
@@ -763,12 +816,21 @@ function ExerciseSection({ exercises, onAdd, onRemove }) {
         </ul>
       )}
       {open && (
-        <div className="bg-stone-100 text-stone-900 rounded-xl p-4 flex flex-col gap-2">
-          <input type="text" placeholder="Type d'activité (optionnel)" value={description} onChange={e => setDescription(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
-          <input type="number" placeholder="Calories brûlées" value={calories} onChange={e => setCalories(e.target.value)} className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+        <div className="bg-stone-100 text-stone-900 rounded-2xl shadow-md shadow-black/20 p-4 flex flex-col gap-2">
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="Décris ta séance : machine, exercice, poids, séries et répétitions, durée..."
+            rows={3}
+            className="border border-stone-300 rounded-lg px-3 py-2 text-sm"
+            autoFocus
+          />
+          {error && <p className="text-rose-500 text-xs">{error}</p>}
           <div className="flex gap-2">
-            <button onClick={() => setOpen(false)} className="px-3 py-2 rounded-lg border border-stone-300 text-sm">Annuler</button>
-            <button onClick={add} disabled={!calories} className="flex-1 bg-amber-500 text-stone-900 font-medium py-2 rounded-lg text-sm disabled:opacity-40">Ajouter</button>
+            <button onClick={() => { setOpen(false); setDescription(""); setError(""); }} className="px-3 py-2 rounded-lg border border-stone-300 text-sm">Annuler</button>
+            <button onClick={add} disabled={loading || !description.trim()} className="flex-1 bg-amber-500 text-stone-900 font-medium py-2 rounded-lg text-sm disabled:opacity-40">
+              {loading ? "Analyse en cours..." : "Analyser & ajouter"}
+            </button>
           </div>
         </div>
       )}
@@ -855,7 +917,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
     <div className="min-h-screen bg-stone-950 text-stone-100 px-5 py-8">
       <div className="max-w-lg mx-auto">
         <header className="flex items-center justify-between mb-1">
-          <p className="font-mono text-xs tracking-widest text-amber-500 uppercase">{profile.goal.replace(/_/g, " ")}</p>
+          <span className="font-mono text-[10px] tracking-widest text-amber-500 uppercase bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1">{profile.goal.replace(/_/g, " ")}</span>
           <div className="flex items-center gap-3">
             <button onClick={() => { if (window.confirm("Modifier ton profil ? Il faudra tout resaisir (objectif, âge, poids, activité...).")) onEditProfile(); }} className="font-mono text-xs text-stone-500 underline">modifier</button>
             <button onClick={onOpenSettings} className="text-stone-500 text-lg">⚙</button>
@@ -864,7 +926,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
 
         <div className="flex items-center justify-between mb-1">
           <button onClick={() => onNavigateDay(-1)} className="text-stone-500 hover:text-stone-100 text-xl px-2">←</button>
-          <h1 className="text-2xl font-black capitalize text-center">{niceDate}</h1>
+          <h1 className="text-2xl font-display font-black capitalize text-center">{niceDate}</h1>
           <button onClick={() => onNavigateDay(1)} className="text-stone-500 hover:text-stone-100 text-xl px-2">→</button>
         </div>
 
@@ -879,7 +941,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
         )}
         {streak === 0 && <div className="mb-6" />}
 
-        <button onClick={onOpenWeight} className="w-full bg-stone-100 text-stone-900 rounded-2xl p-5 text-left mb-6">
+        <button onClick={onOpenWeight} className="w-full bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 text-left mb-6">
           <div className="flex justify-between items-center mb-2">
             <h2 className="font-semibold">Suivi du poids</h2>
             <span className="font-mono text-xs text-amber-600">voir tout →</span>
@@ -898,7 +960,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
           })()}
         </button>
 
-        <div className="bg-stone-100 text-stone-900 rounded-2xl p-5 mb-6">
+        <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
             <button onClick={() => setMacroView(v => v === "gauges" ? "chart" : "gauges")} className="text-stone-400 hover:text-stone-900 px-1">←</button>
             <span className="font-mono text-xs text-stone-400 uppercase tracking-wide">{macroView === "gauges" ? "Jauges" : "Répartition"}</span>
@@ -920,7 +982,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
 
         <WeeklyTrend meals={allMeals} endDateKey={date} target={targets.calories} />
         <WaterTracker count={waterCount} onSet={onSetWater} />
-        <ExerciseSection exercises={dayExercises} onAdd={onAddExercise} onRemove={onRemoveExercise} />
+        <ExerciseSection exercises={dayExercises} weightKg={profile.weightKg} apiKey={apiKey} onAdd={onAddExercise} onRemove={onRemoveExercise} />
 
         <div className="flex flex-col gap-4">
           {SLOTS.map(slot => {
@@ -936,7 +998,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
                     {slotMeals.map(m => editingId === m.id ? (
                       <EditMealForm key={m.id} meal={m} onCancel={() => setEditingId(null)} onSave={(updated) => { onEditMeal(updated); setEditingId(null); }} />
                     ) : (
-                      <li key={m.id} className="bg-stone-100 text-stone-900 rounded-xl px-4 py-3 flex justify-between items-start gap-3">
+                      <li key={m.id} className="bg-stone-100 text-stone-900 rounded-2xl shadow-md shadow-black/20 px-4 py-3 flex justify-between items-start gap-3">
                         {m.photo && <img src={m.photo} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0" />}
                         <div className="flex-1">
                           <p className="font-medium">{m.description}</p>
@@ -957,7 +1019,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
 
         {openSlot && (
           <div className="fixed inset-0 bg-black bg-opacity-70 flex items-end sm:items-center justify-center z-50 p-4" style={{ paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}>
-            <div className="bg-stone-100 text-stone-900 rounded-2xl w-full max-w-sm p-6 max-h-[85vh] overflow-y-auto">
+            <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 w-full max-w-sm p-6 max-h-[85vh] overflow-y-auto">
               <h3 className="text-xl font-semibold mb-4">{SLOTS.find(s => s.type === openSlot)?.label}</h3>
 
               <div className="grid grid-cols-3 gap-1 bg-stone-200 rounded-xl p-1 mb-4">
