@@ -186,6 +186,16 @@ function computeProjection(weights, targetWeightKg) {
 }
 
 /** Nombre de jours consécutifs (jusqu'à hier, ou aujourd'hui si déjà renseigné) où les calories sont restées dans la cible */
+/** Flèche de tendance entre les deux dernières pesées */
+function weightTrendArrow(weights) {
+  const entries = Object.entries(weights).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length < 2) return null;
+  const diff = entries[entries.length - 1][1] - entries[entries.length - 2][1];
+  if (diff > 0.1) return "↗️";
+  if (diff < -0.1) return "↘️";
+  return "➡️";
+}
+
 function computeStreak(meals, targetCalories) {
   if (!targetCalories) return 0;
   let streak = 0;
@@ -272,10 +282,10 @@ async function analyzeGoal({ sex, age, heightCm, weightKg, activity, description
 - Niveau d'activité : ${activityLabel}
 - Objectif exprimé avec ses propres mots : "${description}"
 
-Calcule ses besoins quotidiens (calories, protéines, glucides, lipides) adaptés précisément à cet objectif, en te basant sur les principes de nutrition sportive (déficit ou surplus raisonnable et sûr, apport protéique adapté à l'objectif, y compris pour des objectifs nuancés comme une recomposition corporelle). Donne aussi une étiquette courte (2-4 mots) résumant l'objectif, et la tendance de poids générale à attendre.
+Calcule ses besoins quotidiens (calories, protéines, glucides, lipides) adaptés précisément à cet objectif, en te basant sur les principes de nutrition sportive (déficit ou surplus raisonnable et sûr, apport protéique adapté à l'objectif, y compris pour des objectifs nuancés comme une recomposition corporelle). Donne aussi une étiquette courte (2-4 mots) résumant l'objectif, la tendance de poids générale à attendre, et une courte explication (1-2 phrases, en français, ton direct) justifiant ces chiffres pour cette personne.
 
 Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact :
-{"label": "étiquette courte", "direction": "perte" | "prise" | "maintien", "calories": nombre, "protein": nombre_grammes, "carbs": nombre_grammes, "fat": nombre_grammes}`;
+{"label": "étiquette courte", "direction": "perte" | "prise" | "maintien", "explanation": "1-2 phrases expliquant le calcul", "calories": nombre, "protein": nombre_grammes, "carbs": nombre_grammes, "fat": nombre_grammes}`;
 
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`, {
     method: "POST",
@@ -300,6 +310,7 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises m
   return {
     label: parsed.label || "Objectif personnalisé",
     direction: ["perte", "prise", "maintien"].includes(parsed.direction) ? parsed.direction : "maintien",
+    explanation: parsed.explanation || "",
     calories: Math.round(parsed.calories) || 2000,
     protein: Math.round(parsed.protein) || 100,
     carbs: Math.round(parsed.carbs) || 200,
@@ -458,6 +469,7 @@ function SettingsModal({ apiKey, onSaveApiKey, profile, weights, onUpdateProfile
       goal: pendingResult.label,
       goalDescription: goalDescInput,
       goalDirection: pendingResult.direction,
+      goalExplanation: pendingResult.explanation,
       targets: { calories: pendingResult.calories, protein: pendingResult.protein, carbs: pendingResult.carbs, fat: pendingResult.fat },
     });
     setPendingResult(null);
@@ -469,7 +481,9 @@ function SettingsModal({ apiKey, onSaveApiKey, profile, weights, onUpdateProfile
         <h3 className="text-xl font-display font-semibold mb-4">Réglages</h3>
 
         <p className="text-xs text-stone-500 uppercase tracking-wide mb-1">Objectif actuel</p>
-        <p className="font-medium mb-3">{profile.goal}</p>
+        <p className="font-medium mb-1">{profile.goal}</p>
+        {profile.goalExplanation && <p className="text-xs text-stone-500 italic mb-3">{profile.goalExplanation}</p>}
+        {!profile.goalExplanation && <div className="mb-3" />}
         <textarea
           value={goalDescInput}
           onChange={e => { setGoalDescInput(e.target.value); setPendingResult(null); }}
@@ -483,6 +497,7 @@ function SettingsModal({ apiKey, onSaveApiKey, profile, weights, onUpdateProfile
         {pendingResult ? (
           <div className="bg-stone-200/60 rounded-xl p-4 mb-5 font-mono text-sm flex flex-col gap-1">
             <p className="font-sans font-semibold mb-1">{pendingResult.label}</p>
+            {pendingResult.explanation && <p className="font-sans text-xs text-stone-600 italic mb-2">{pendingResult.explanation}</p>}
             <div className="flex justify-between"><span>Calories</span><span className="font-semibold">{pendingResult.calories} kcal</span></div>
             <div className="flex justify-between"><span>Protéines</span><span className="font-semibold">{pendingResult.protein} g</span></div>
             <div className="flex justify-between"><span>Glucides</span><span className="font-semibold">{pendingResult.carbs} g</span></div>
@@ -653,7 +668,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
     onSaveApiKey(apiKeyInput.trim());
     onDone({
       sex, age: Number(age), heightCm: Number(heightCm), weightKg: Number(weightKg), activity,
-      goal: aiResult.label, goalDescription, goalDirection: aiResult.direction,
+      goal: aiResult.label, goalDescription, goalDirection: aiResult.direction, goalExplanation: aiResult.explanation,
       targets: { calories: aiResult.calories, protein: aiResult.protein, carbs: aiResult.carbs, fat: aiResult.fat },
       weighDay, targetWeightKg: targetWeightKg ? Number(targetWeightKg) : null,
     });
@@ -749,7 +764,7 @@ function Onboarding({ onDone, apiKey, onSaveApiKey }) {
         {step === 4 && aiResult && (
           <>
             <h2 className="text-2xl font-display font-bold mb-2">{aiResult.label}</h2>
-            <p className="text-sm text-stone-500 mb-4">Voici tes besoins quotidiens calculés :</p>
+            {aiResult.explanation && <p className="text-sm text-stone-600 italic mb-4">{aiResult.explanation}</p>}
             <div className="bg-stone-200/60 rounded-xl p-4 mb-6 font-mono text-sm flex flex-col gap-1">
               <div className="flex justify-between"><span>Calories</span><span className="font-semibold">{aiResult.calories} kcal</span></div>
               <div className="flex justify-between"><span>Protéines</span><span className="font-semibold">{aiResult.protein} g</span></div>
@@ -961,7 +976,7 @@ function WaterTracker({ count, onSet }) {
   );
 }
 
-function ExerciseSection({ exercises, weightKg, apiKey, onAdd, onRemove }) {
+function ExerciseSection({ exercises, weightKg, apiKey, onApiResult, onAdd, onRemove }) {
   const [open, setOpen] = useState(false);
   const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(false);
@@ -973,10 +988,12 @@ function ExerciseSection({ exercises, weightKg, apiKey, onAdd, onRemove }) {
     setError("");
     try {
       const result = await analyzeExercise({ description, weightKg, apiKey });
+      onApiResult(true);
       onAdd({ id: `${Date.now()}`, description: result.label, calories: result.calories });
       setDescription(""); setOpen(false);
     } catch (e) {
       setError(e.message || "Erreur inconnue");
+      onApiResult(false);
     } finally {
       setLoading(false);
     }
@@ -1027,7 +1044,7 @@ function ExerciseSection({ exercises, weightKg, apiKey, onAdd, onRemove }) {
   );
 }
 
-function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey, onNavigateDay, onGoToday, onOpenSettings, onOpenWeight, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite, waterCount, onSetWater, dayExercises, onAddExercise, onRemoveExercise }) {
+function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey, apiKeyInvalid, onApiResult, onNavigateDay, onGoToday, onOpenSettings, onOpenWeight, onAddMeal, onRemoveMeal, onEditMeal, onSaveFavorite, onRemoveFavorite, waterCount, onSetWater, dayExercises, onAddExercise, onRemoveExercise }) {
   const [openSlot, setOpenSlot] = useState(null);
   const [mode, setMode] = useState("describe");
   const [text, setText] = useState("");
@@ -1068,11 +1085,13 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
         photoDataUrl = compressed.dataUrl;
       }
       const result = await analyzeMeal({ description: text, imageBase64, imageMediaType, apiKey });
+      onApiResult(true);
       const meal = { id: `${Date.now()}`, type: openSlot, description: text || result.label, calories: result.calories, protein: result.protein, carbs: result.carbs, fat: result.fat, photo: photoDataUrl };
       onAddMeal(meal);
       setOpenSlot(null); setText(""); setPhoto(null);
     } catch (e) {
       setError(e.message || "Erreur inconnue");
+      onApiResult(false);
     } finally {
       setLoading(false);
     }
@@ -1108,7 +1127,10 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
         <header className="grid grid-cols-3 items-center mb-4">
           <span className="font-display text-sm font-semibold text-stone-400 justify-self-start">Carnet Nutrition</span>
           <span className="font-mono text-[10px] tracking-widest text-amber-500 uppercase bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1 justify-self-center text-center">{profile.goal}</span>
-          <button onClick={onOpenSettings} className="text-stone-400 hover:text-stone-100 text-lg justify-self-end">⚙</button>
+          <button onClick={onOpenSettings} className="relative text-stone-400 hover:text-stone-100 text-lg justify-self-end">
+            ⚙
+            {apiKeyInvalid && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 rounded-full" />}
+          </button>
         </header>
 
         <div className="flex items-center justify-between mb-1">
@@ -1124,9 +1146,18 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
         )}
 
         {streak > 0 && (
-          <p className="text-center font-mono text-xs text-amber-500 mb-6">🔥 {streak} jour{streak > 1 ? "s" : ""} d'affilée dans l'objectif</p>
+          <p className="text-center font-mono text-xs text-amber-500 mb-3">🔥 {streak} jour{streak > 1 ? "s" : ""} d'affilée dans l'objectif</p>
         )}
-        {streak === 0 && <div className="mb-6" />}
+        {streak === 0 && <div className="mb-3" />}
+
+        {date === todayKey() && (
+          <p className="text-center font-display text-lg font-semibold mb-6">
+            {Math.max(0, effectiveCalorieTarget - totals.calories) === 0
+              ? "Objectif calorique atteint pour aujourd'hui"
+              : <>Il te reste <span className="text-amber-500">{Math.max(0, effectiveCalorieTarget - totals.calories)} kcal</span> et <span className="text-emerald-500">{Math.max(0, targets.protein - totals.protein)} g</span> de protéines</>}
+          </p>
+        )}
+        {date !== todayKey() && <div className="mb-6" />}
 
         <div className="bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
@@ -1184,7 +1215,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
         </div>
 
         <WaterTracker count={waterCount} onSet={onSetWater} />
-        <ExerciseSection exercises={dayExercises} weightKg={profile.weightKg} apiKey={apiKey} onAdd={onAddExercise} onRemove={onRemoveExercise} />
+        <ExerciseSection exercises={dayExercises} weightKg={profile.weightKg} apiKey={apiKey} onApiResult={onApiResult} onAdd={onAddExercise} onRemove={onRemoveExercise} />
 
         <button onClick={onOpenWeight} className="w-full bg-stone-100 text-stone-900 rounded-3xl shadow-xl shadow-black/30 p-5 text-left mb-6">
           <div className="flex justify-between items-center mb-2">
@@ -1192,7 +1223,7 @@ function DayView({ date, profile, weights, dayMeals, allMeals, favorites, apiKey
             <span className="font-mono text-xs text-amber-600">voir tout →</span>
           </div>
           {latestWeight ? (
-            <p className="font-mono text-sm text-stone-600">Dernière pesée : {latestWeight[1]} kg</p>
+            <p className="font-mono text-sm text-stone-600">Dernière pesée : {latestWeight[1]} kg {weightTrendArrow(weights)}</p>
           ) : (
             <p className="text-stone-500 text-sm">Pas encore de pesée enregistrée</p>
           )}
@@ -1339,6 +1370,7 @@ function App() {
   const [water, setWater] = useState(() => load("nutri_water", {}));
   const [exercises, setExercises] = useState(() => load("nutri_exercises", {}));
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("nutri_gemini_key") || "");
+  const [apiKeyInvalid, setApiKeyInvalid] = useState(() => localStorage.getItem("nutri_apikey_invalid") === "1");
   const [view, setView] = useState("day");
   const [selectedDate, setSelectedDate] = useState(() => todayKey());
   const [showSettings, setShowSettings] = useState(false);
@@ -1360,7 +1392,8 @@ function App() {
   function updateMeals(m) { setMeals(m); save("nutri_meals", m); }
   function updateWeights(w) { setWeights(w); save("nutri_weights", w); }
   function updateFavorites(f) { setFavorites(f); save("nutri_favorites", f); }
-  function updateApiKey(k) { setApiKey(k); localStorage.setItem("nutri_gemini_key", k); }
+  function updateApiKey(k) { setApiKey(k); localStorage.setItem("nutri_gemini_key", k); setApiKeyStatus(false); }
+  function setApiKeyStatus(invalid) { setApiKeyInvalid(invalid); localStorage.setItem("nutri_apikey_invalid", invalid ? "1" : "0"); }
   function updateWater(w) { setWater(w); save("nutri_water", w); }
   function updateExercises(e) { setExercises(e); save("nutri_exercises", e); }
 
@@ -1413,6 +1446,8 @@ function App() {
           allMeals={meals}
           favorites={favorites}
           apiKey={apiKey}
+          apiKeyInvalid={apiKeyInvalid}
+          onApiResult={(ok) => setApiKeyStatus(!ok)}
           onNavigateDay={(delta) => setSelectedDate(toKey(addDays(new Date(selectedDate + "T00:00:00"), delta)))}
           onGoToday={() => setSelectedDate(todayKey())}
           onOpenSettings={() => setShowSettings(true)}
