@@ -87,6 +87,21 @@ function fallbackTargets({ sex, age, heightCm, weightKg, activity }) {
 }
 
 function pad(n) { return String(n).padStart(2, "0"); }
+
+/** Extrait et parse le JSON d'une réponse IA, même s'il y a du texte ou des balises autour, ou une coupure en fin de réponse */
+function parseAiJson(rawText) {
+  let cleaned = rawText.replace(/```json|```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    cleaned = cleaned.slice(start, end + 1);
+  }
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    throw new Error("Réponse de l'IA incomplète ou illisible, réessaie.");
+  }
+}
 function toKey(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 function todayKey() { return toKey(new Date()); }
 function mondayOf(date) {
@@ -244,7 +259,7 @@ Résumé bref (2-3 phrases FR, tutoiement, direct) : régularité, respect cible
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.4, maxOutputTokens: 200 },
+      generationConfig: { temperature: 0.4, maxOutputTokens: 350 },
     }),
   });
   if (!res.ok) {
@@ -283,7 +298,7 @@ async function analyzeMeal({ description, imageBase64, imageMediaType, apiKey })
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 200 } }),
+    body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 350 } }),
   });
   if (!res.ok) {
     let detail = "";
@@ -295,8 +310,7 @@ async function analyzeMeal({ description, imageBase64, imageMediaType, apiKey })
   }
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  const cleaned = rawText.replace(/```json|```/g, "").trim();
-  const parsed = JSON.parse(cleaned);
+  const parsed = parseAiJson(rawText);
   return {
     label: parsed.label || "Repas",
     calories: Math.round(parsed.calories) || 0,
@@ -319,7 +333,7 @@ Calcule ses besoins quotidiens (déficit/surplus sûr, protéines adaptées, y c
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.3, maxOutputTokens: 300 },
+      generationConfig: { temperature: 0.3, maxOutputTokens: 450 },
     }),
   });
   if (!res.ok) {
@@ -332,8 +346,7 @@ Calcule ses besoins quotidiens (déficit/surplus sûr, protéines adaptées, y c
   }
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  const cleaned = rawText.replace(/```json|```/g, "").trim();
-  const parsed = JSON.parse(cleaned);
+  const parsed = parseAiJson(rawText);
   return {
     label: parsed.label || "Objectif personnalisé",
     direction: ["perte", "prise", "maintien"].includes(parsed.direction) ? parsed.direction : "maintien",
@@ -355,7 +368,7 @@ async function analyzeExercise({ description, weightKg, apiKey }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }, { text: `Séance : ${description}` }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 120 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 200 },
     }),
   });
   if (!res.ok) {
@@ -368,8 +381,7 @@ async function analyzeExercise({ description, weightKg, apiKey }) {
   }
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  const cleaned = rawText.replace(/```json|```/g, "").trim();
-  const parsed = JSON.parse(cleaned);
+  const parsed = parseAiJson(rawText);
   return {
     label: parsed.label || "Séance de sport",
     calories: Math.round(parsed.calories) || 0,
@@ -386,7 +398,7 @@ async function analyzeFoodSuggestion({ remainingCalories, remainingProtein, rema
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.4, maxOutputTokens: 150 },
+      generationConfig: { temperature: 0.4, maxOutputTokens: 250 },
     }),
   });
   if (!res.ok) {
@@ -399,8 +411,7 @@ async function analyzeFoodSuggestion({ remainingCalories, remainingProtein, rema
   }
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  const cleaned = rawText.replace(/```json|```/g, "").trim();
-  const parsed = JSON.parse(cleaned);
+  const parsed = parseAiJson(rawText);
   return { food: parsed.food || "Aucune suggestion", reason: parsed.reason || "" };
 }
 
